@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import Image from "next/image";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -66,20 +67,30 @@ export function SnapshotGallery({ snapshots, onView, onDelete }: SnapshotGallery
                   key={snapshot.id}
                   className="relative group rounded-lg overflow-hidden border border-gray-200"
                 >
-                  <div className="aspect-video bg-gradient-to-br from-gray-200 to-gray-300 flex items-center justify-center">
-                    <svg
-                      className="w-8 h-8 text-gray-400"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
+                  <div className="aspect-video bg-gradient-to-br from-gray-200 to-gray-300 flex items-center justify-center overflow-hidden relative">
+                    {snapshot.imageData ? (
+                      <Image 
+                        src={snapshot.imageData} 
+                        alt={`Snapshot ${snapshot.id}`}
+                        fill
+                        className="object-cover"
+                        unoptimized
                       />
-                    </svg>
+                    ) : (
+                      <svg
+                        className="w-8 h-8 text-gray-400"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
+                        />
+                      </svg>
+                    )}
                   </div>
                   
                   {/* Overlay on hover */}

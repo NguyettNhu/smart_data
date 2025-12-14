@@ -20,6 +20,7 @@ interface Detection {
 interface VideoStreamProps {
   showSkeleton: boolean;
   onFallDetected: (detection: Detection) => void;
+  onSnapshotCapture?: (imageData: string, detection: Detection) => void;
 }
 
 function generateSkeletonPoints(isFall: boolean, baseX: number, baseY: number): { x: number; y: number }[] {
@@ -65,12 +66,50 @@ const SKELETON_CONNECTIONS = [
   [1, 8], [8, 9], [8, 10], [9, 11], [10, 12],
 ];
 
-export function VideoStream({ showSkeleton, onFallDetected }: VideoStreamProps) {
+// Interpolate between standing and fallen skeleton
+function generateInterpolatedSkeleton(t: number, baseX: number, baseY: number): { x: number; y: number }[] {
+  const standing = generateSkeletonPoints(false, baseX, baseY);
+  const fallen = generateSkeletonPoints(true, baseX, baseY + 130);
+  
+  return standing.map((point, i) => ({
+    x: point.x + (fallen[i].x - point.x) * t,
+    y: point.y + (fallen[i].y - point.y) * t,
+  }));
+}
+
+export function VideoStream({ showSkeleton, onFallDetected, onSnapshotCapture }: VideoStreamProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isConnected, setIsConnected] = useState(true);
+  const [manualFallMode, setManualFallMode] = useState(false);
+  const [fallTransition, setFallTransition] = useState(0); // 0 = standing, 1 = fallen
   const animationRef = useRef<number | null>(null);
   const lastFallTimeRef = useRef<number>(0);
+  const manualFallTriggeredRef = useRef<boolean>(false);
   const { addToast } = useToast();
+
+  // Trigger manual fall
+  const triggerManualFall = useCallback(() => {
+    if (manualFallMode) {
+      // Reset to standing
+      setManualFallMode(false);
+      setFallTransition(0);
+      manualFallTriggeredRef.current = false;
+    } else {
+      // Trigger fall
+      setManualFallMode(true);
+      manualFallTriggeredRef.current = true;
+    }
+  }, [manualFallMode]);
+
+  // Animate fall transition
+  useEffect(() => {
+    if (manualFallMode && fallTransition < 1) {
+      const timer = setTimeout(() => {
+        setFallTransition(prev => Math.min(prev + 0.1, 1));
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [manualFallMode, fallTransition]);
 
   // Simulate YOLO detections
   const generateDetections = useCallback((): Detection[] => {
@@ -79,24 +118,63 @@ export function VideoStream({ showSkeleton, onFallDetected }: VideoStreamProps) 
     
     const newDetections: Detection[] = [];
     
-    // Regular person detection
-    const personCount = Math.floor(Math.random() * 3) + 1;
-    for (let i = 0; i < personCount; i++) {
-      const isFall = shouldHaveFall && i === 0 && now - lastFallTimeRef.current > 10000;
+    // Manual controlled person (first person)
+    if (manualFallMode || fallTransition > 0) {
+      const isFullyFallen = fallTransition >= 1;
+      const baseX = 300;
+      
+      const manualDetection: Detection = {
+        id: "manual-person",
+        type: isFullyFallen ? "fall" : "person",
+        confidence: 0.95 + Math.random() * 0.04,
+        x: baseX,
+        y: isFullyFallen ? 280 : 150 + fallTransition * 80,
+        width: isFullyFallen ? 180 : 80 + fallTransition * 50,
+        height: isFullyFallen ? 80 : 180 - fallTransition * 100,
+        skeleton: showSkeleton ? generateInterpolatedSkeleton(fallTransition, baseX, 150) : undefined,
+      };
+      
+      // Trigger fall detection when fully fallen and not yet triggered
+      if (isFullyFallen && manualFallTriggeredRef.current) {
+        manualFallTriggeredRef.current = false;
+        onFallDetected(manualDetection);
+        
+        // Capture snapshot
+        if (canvasRef.current && onSnapshotCapture) {
+          const imageData = canvasRef.current.toDataURL("image/png");
+          onSnapshotCapture(imageData, manualDetection);
+        }
+        
+        addToast({
+          title: "⚠️ PHÁT HIỆN NGÃ!",
+          description: `Camera 01 - Điều khiển thủ công - Độ tin cậy: ${(manualDetection.confidence * 100).toFixed(0)}%`,
+          variant: "destructive",
+          duration: 8000,
+        });
+      }
+      
+      newDetections.push(manualDetection);
+    }
+    
+    // Additional random people (not the manual one)
+    const additionalPeople = manualFallMode ? 1 : Math.floor(Math.random() * 2) + 1;
+    for (let i = 0; i < additionalPeople; i++) {
+      const isFall = !manualFallMode && shouldHaveFall && i === 0 && now - lastFallTimeRef.current > 10000;
       
       if (isFall) {
         lastFallTimeRef.current = now;
       }
       
+      const xOffset = manualFallMode ? 500 : 100;
       const detection: Detection = {
         id: `det-${i}`,
         type: isFall ? "fall" : "person",
         confidence: 0.85 + Math.random() * 0.14,
-        x: 100 + (i * 200) + Math.sin(now / 1000 + i) * 30,
+        x: xOffset + (i * 200) + Math.sin(now / 1000 + i) * 30,
         y: isFall ? 280 + Math.random() * 20 : 150 + Math.sin(now / 800 + i) * 20,
         width: isFall ? 180 : 80,
         height: isFall ? 80 : 180,
-        skeleton: showSkeleton ? generateSkeletonPoints(isFall, 100 + (i * 200), isFall ? 280 : 150) : undefined,
+        skeleton: showSkeleton ? generateSkeletonPoints(isFall, xOffset + (i * 200), isFall ? 280 : 150) : undefined,
       };
       
       if (isFall) {
@@ -113,7 +191,7 @@ export function VideoStream({ showSkeleton, onFallDetected }: VideoStreamProps) 
     }
     
     return newDetections;
-  }, [showSkeleton, onFallDetected, addToast]);
+  }, [showSkeleton, onFallDetected, addToast, manualFallMode, fallTransition, onSnapshotCapture]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -255,6 +333,32 @@ export function VideoStream({ showSkeleton, onFallDetected }: VideoStreamProps) 
         </div>
 
         <div className="absolute bottom-4 right-4 flex gap-2">
+          {/* Manual Fall Control Button */}
+          <Button
+            size="sm"
+            variant={manualFallMode ? "destructive" : "default"}
+            className={manualFallMode 
+              ? "bg-red-500 hover:bg-red-600 text-white animate-pulse" 
+              : "bg-orange-500 hover:bg-orange-600 text-white"
+            }
+            onClick={triggerManualFall}
+          >
+            {manualFallMode ? (
+              <>
+                <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" />
+                </svg>
+                Đứng dậy
+              </>
+            ) : (
+              <>
+                <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                </svg>
+                Mô phỏng Ngã
+              </>
+            )}
+          </Button>
           <Button
             size="sm"
             variant="outline"
@@ -264,6 +368,18 @@ export function VideoStream({ showSkeleton, onFallDetected }: VideoStreamProps) 
             {isConnected ? "Pause" : "Resume"}
           </Button>
         </div>
+
+        {/* Fall status indicator */}
+        {manualFallMode && (
+          <div className="absolute top-4 right-4">
+            <Badge 
+              variant="destructive" 
+              className="animate-pulse text-sm px-3 py-1"
+            >
+              ⚠️ ĐANG NGÃ - {(fallTransition * 100).toFixed(0)}%
+            </Badge>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

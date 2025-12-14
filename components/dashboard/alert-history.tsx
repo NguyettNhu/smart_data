@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useState, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
@@ -24,6 +24,8 @@ interface AlertHistoryProps {
 }
 
 export function AlertHistory({ alerts, onAcknowledge, onPlayback }: AlertHistoryProps) {
+  const [searchQuery, setSearchQuery] = useState("");
+
   const formatTime = (date: Date) => {
     return date.toLocaleTimeString("vi-VN", {
       hour: "2-digit",
@@ -31,6 +33,37 @@ export function AlertHistory({ alerts, onAcknowledge, onPlayback }: AlertHistory
       second: "2-digit",
     });
   };
+
+  const formatFullDateTime = (date: Date) => {
+    return date.toLocaleString("vi-VN", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  };
+
+  // Filter alerts based on search query (search by time, date, camera)
+  const filteredAlerts = useMemo(() => {
+    if (!searchQuery.trim()) return alerts;
+    
+    const query = searchQuery.toLowerCase().trim();
+    return alerts.filter((alert) => {
+      const timeStr = formatTime(alert.timestamp).toLowerCase();
+      const fullDateStr = formatFullDateTime(alert.timestamp).toLowerCase();
+      const cameraStr = alert.camera.toLowerCase();
+      const typeStr = alert.type === "fall" ? "ngã" : alert.type;
+      
+      return (
+        timeStr.includes(query) ||
+        fullDateStr.includes(query) ||
+        cameraStr.includes(query) ||
+        typeStr.includes(query)
+      );
+    });
+  }, [alerts, searchQuery]);
 
   const getTypeStyles = (type: string) => {
     switch (type) {
@@ -57,18 +90,105 @@ export function AlertHistory({ alerts, onAcknowledge, onPlayback }: AlertHistory
 
   return (
     <Card className="h-full flex flex-col">
-      <CardHeader className="pb-3">
+      <CardHeader className="pb-3 space-y-3">
         <div className="flex items-center justify-between">
           <CardTitle className="text-lg">Lịch sử cảnh báo</CardTitle>
           <Badge variant="outline" className="text-xs">
             {alerts.filter((a) => !a.acknowledged).length} mới
           </Badge>
         </div>
+        {/* Search bar with glow effect */}
+        <div className="relative group">
+          {/* Glow rotating layer */}
+          <div
+            className="
+              pointer-events-none
+              absolute -inset-[2px]
+              rounded-xl
+              bg-gradient-to-r
+              from-purple-500 via-pink-500 to-blue-500
+              blur-lg
+              opacity-60
+              animate-spin-slow
+            "
+          />
+          {/* Plasma wave layer */}
+          <div
+            className="
+              pointer-events-none
+              absolute -inset-[1px]
+              rounded-xl
+              bg-[length:200%_200%]
+              bg-gradient-to-r
+              from-purple-400/50 via-pink-400/50 to-blue-400/50
+              opacity-40
+              animate-wave
+            "
+          />
+          {/* Input wrapper */}
+          <div className="relative flex items-center bg-black/80 rounded-xl border border-white/10">
+            {/* Search icon with glow */}
+            <svg
+              className="
+                ml-3
+                w-4 h-4
+                text-purple-400
+                animate-pulse-soft
+                drop-shadow-[0_0_6px_rgba(168,85,247,0.8)]
+              "
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+              />
+            </svg>
+            {/* Input */}
+            <input
+              type="text"
+              placeholder="Tìm theo thời gian (vd: 14:30, 14/12)..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="
+                w-full
+                px-3 py-2
+                bg-transparent
+                text-white
+                text-sm
+                placeholder-gray-400
+                outline-none
+                rounded-xl
+                transition-all duration-300
+                focus:shadow-[0_0_25px_rgba(168,85,247,0.6)]
+              "
+            />
+            {/* Clear button */}
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery("")}
+                className="mr-3 text-gray-400 hover:text-white transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
+          </div>
+        </div>
+        {searchQuery && (
+          <p className="text-xs text-gray-500">
+            Tìm thấy {filteredAlerts.length} kết quả
+          </p>
+        )}
       </CardHeader>
       <CardContent className="flex-1 p-0 overflow-hidden">
         <ScrollArea className="h-full px-4 pb-4">
           <div className="space-y-3">
-            {alerts.length === 0 ? (
+            {filteredAlerts.length === 0 ? (
               <div className="text-center py-8 text-gray-500">
                 <svg
                   className="w-12 h-12 mx-auto mb-3 text-gray-300"
@@ -80,13 +200,13 @@ export function AlertHistory({ alerts, onAcknowledge, onPlayback }: AlertHistory
                     strokeLinecap="round"
                     strokeLinejoin="round"
                     strokeWidth={2}
-                    d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                    d={searchQuery ? "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" : "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"}
                   />
                 </svg>
-                <p>Chưa có cảnh báo nào</p>
+                <p>{searchQuery ? "Không tìm thấy kết quả" : "Chưa có cảnh báo nào"}</p>
               </div>
             ) : (
-              alerts.map((alert) => {
+              filteredAlerts.map((alert) => {
                 const styles = getTypeStyles(alert.type);
                 return (
                   <div

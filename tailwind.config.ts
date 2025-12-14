@@ -70,10 +70,26 @@ const config: Config = {
           "0%": { transform: "translateX(100%)", opacity: "0" },
           "100%": { transform: "translateX(0)", opacity: "1" },
         },
+        "spin-slow": {
+          "0%": { transform: "rotate(0deg)" },
+          "100%": { transform: "rotate(360deg)" },
+        },
+        "wave": {
+          "0%": { backgroundPosition: "0% 50%" },
+          "50%": { backgroundPosition: "100% 50%" },
+          "100%": { backgroundPosition: "0% 50%" },
+        },
+        "pulse-soft": {
+          "0%, 100%": { opacity: "1", transform: "scale(1)" },
+          "50%": { opacity: "0.7", transform: "scale(1.1)" },
+        },
       },
       animation: {
         "pulse-alert": "pulse-alert 1s ease-in-out infinite",
         "slide-in": "slide-in 0.3s ease-out",
+        "spin-slow": "spin-slow 8s linear infinite",
+        "wave": "wave 3s ease-in-out infinite",
+        "pulse-soft": "pulse-soft 2s ease-in-out infinite",
       },
     },
   },
