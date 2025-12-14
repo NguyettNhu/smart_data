@@ -1,65 +1,139 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import React, { useState, useCallback } from "react";
+import { VideoStream } from "@/components/dashboard/video-stream";
+import { AlertHistory, AlertEvent } from "@/components/dashboard/alert-history";
+import { StatsHeader } from "@/components/dashboard/stats-header";
+import { SnapshotGallery, Snapshot } from "@/components/dashboard/snapshot-gallery";
+
+export default function DashboardPage() {
+  const [alerts, setAlerts] = useState<AlertEvent[]>([
+    {
+      id: "1",
+      timestamp: new Date(Date.now() - 1000 * 60 * 5),
+      camera: "Camera 01 - Phòng khách",
+      type: "fall",
+      confidence: 0.95,
+      snapshot: "snapshot-1",
+      acknowledged: true,
+    },
+    {
+      id: "2",
+      timestamp: new Date(Date.now() - 1000 * 60 * 30),
+      camera: "Camera 01 - Phòng khách",
+      type: "warning",
+      confidence: 0.72,
+      acknowledged: true,
+    },
+  ]);
+
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([
+    {
+      id: "snap-1",
+      timestamp: new Date(Date.now() - 1000 * 60 * 5),
+      camera: "Camera 01",
+      confidence: 0.95,
+    },
+    {
+      id: "snap-2",
+      timestamp: new Date(Date.now() - 1000 * 60 * 60),
+      camera: "Camera 01",
+      confidence: 0.89,
+    },
+  ]);
+
+  const [fallsToday, setFallsToday] = useState(2);
+  const [alarmEnabled, setAlarmEnabled] = useState(true);
+  const [showSkeleton, setShowSkeleton] = useState(false);
+
+  const handleFallDetected = useCallback((detection: { id: string; confidence: number }) => {
+    const newAlert: AlertEvent = {
+      id: `alert-${Date.now()}`,
+      timestamp: new Date(),
+      camera: "Camera 01 - Phòng khách",
+      type: "fall",
+      confidence: detection.confidence,
+      snapshot: `snapshot-${Date.now()}`,
+      acknowledged: false,
+    };
+    
+    setAlerts((prev) => [newAlert, ...prev.slice(0, 49)]);
+    setFallsToday((prev) => prev + 1);
+    
+    // Add snapshot
+    const newSnapshot: Snapshot = {
+      id: `snap-${Date.now()}`,
+      timestamp: new Date(),
+      camera: "Camera 01",
+      confidence: detection.confidence,
+    };
+    setSnapshots((prev) => [newSnapshot, ...prev.slice(0, 11)]);
+  }, []);
+
+  const handleAcknowledge = useCallback((id: string) => {
+    setAlerts((prev) =>
+      prev.map((a) => (a.id === id ? { ...a, acknowledged: true } : a))
+    );
+  }, []);
+
+  const handlePlayback = useCallback((id: string) => {
+    console.log("Playback for alert:", id);
+    // TODO: Implement playback functionality
+  }, []);
+
+  const handleViewSnapshot = useCallback((id: string) => {
+    console.log("View snapshot:", id);
+    // TODO: Implement snapshot viewer
+  }, []);
+
+  const handleDeleteSnapshot = useCallback((id: string) => {
+    setSnapshots((prev) => prev.filter((s) => s.id !== id));
+  }, []);
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="space-y-6">
+      {/* Header */}
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+        <p className="text-gray-500">Giám sát và phát hiện ngã theo thời gian thực</p>
+      </div>
+
+      {/* Stats Header */}
+      <StatsHeader
+        fallsToday={fallsToday}
+        isConnected={true}
+        alarmEnabled={alarmEnabled}
+        onAlarmToggle={setAlarmEnabled}
+        showSkeleton={showSkeleton}
+        onSkeletonToggle={setShowSkeleton}
+      />
+
+      {/* Main Content - Video Stream & Alert History */}
+      <div className="grid grid-cols-1 lg:grid-cols-10 gap-6">
+        {/* Video Stream - 70% */}
+        <div className="lg:col-span-7 h-[500px]">
+          <VideoStream
+            showSkeleton={showSkeleton}
+            onFallDetected={handleFallDetected}
+          />
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+        {/* Alert History - 30% */}
+        <div className="lg:col-span-3 h-[500px]">
+          <AlertHistory
+            alerts={alerts}
+            onAcknowledge={handleAcknowledge}
+            onPlayback={handlePlayback}
+          />
         </div>
-      </main>
+      </div>
+
+      {/* Snapshot Gallery */}
+      <SnapshotGallery
+        snapshots={snapshots}
+        onView={handleViewSnapshot}
+        onDelete={handleDeleteSnapshot}
+      />
     </div>
   );
 }
