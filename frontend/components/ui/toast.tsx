@@ -1,7 +1,7 @@
 "use client";
 
-import React, { createContext, useContext, useState, useCallback } from "react";
 import { cn } from "@/lib/utils";
+import React, { createContext, useCallback, useContext, useState } from "react";
 
 interface Toast {
   id: string;
@@ -32,17 +32,17 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         const audioContext = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
         const oscillator = audioContext.createOscillator();
         const gainNode = audioContext.createGain();
-        
+
         oscillator.connect(gainNode);
         gainNode.connect(audioContext.destination);
-        
+
         oscillator.frequency.value = 800;
         oscillator.type = "square";
         gainNode.gain.value = 0.1;
-        
+
         oscillator.start();
         oscillator.stop(audioContext.currentTime + 0.2);
-        
+
         setTimeout(() => {
           const osc2 = audioContext.createOscillator();
           osc2.connect(gainNode);

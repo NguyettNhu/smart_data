@@ -1,11 +1,11 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
+import { useMemo, useState } from "react";
 
 export interface AlertEvent {
   id: string;
@@ -48,14 +48,14 @@ export function AlertHistory({ alerts, onAcknowledge, onPlayback }: AlertHistory
   // Filter alerts based on search query (search by time, date, camera)
   const filteredAlerts = useMemo(() => {
     if (!searchQuery.trim()) return alerts;
-    
+
     const query = searchQuery.toLowerCase().trim();
     return alerts.filter((alert) => {
       const timeStr = formatTime(alert.timestamp).toLowerCase();
       const fullDateStr = formatFullDateTime(alert.timestamp).toLowerCase();
       const cameraStr = alert.camera.toLowerCase();
       const typeStr = alert.type === "fall" ? "ngã" : alert.type;
-      
+
       return (
         timeStr.includes(query) ||
         fullDateStr.includes(query) ||
@@ -234,7 +234,7 @@ export function AlertHistory({ alerts, onAcknowledge, onPlayback }: AlertHistory
                           Độ tin cậy: {(alert.confidence * 100).toFixed(0)}%
                         </p>
                       </div>
-                      
+
                       {alert.snapshot && (
                         <div className="w-16 h-12 rounded overflow-hidden bg-gray-200 flex-shrink-0">
                           <div className="w-full h-full bg-gradient-to-br from-gray-300 to-gray-400 flex items-center justify-center">
@@ -255,7 +255,7 @@ export function AlertHistory({ alerts, onAcknowledge, onPlayback }: AlertHistory
                         </div>
                       )}
                     </div>
-                    
+
                     <div className="flex gap-2 mt-2">
                       <Button
                         size="sm"

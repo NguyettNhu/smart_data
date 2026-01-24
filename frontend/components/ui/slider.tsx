@@ -1,7 +1,7 @@
 "use client";
 
-import * as React from "react";
 import { cn } from "@/lib/utils";
+import * as React from "react";
 
 interface SliderProps {
   value: number[];
@@ -48,3 +48,4 @@ const Slider = React.forwardRef<HTMLDivElement, SliderProps>(
 Slider.displayName = "Slider";
 
 export { Slider };
+

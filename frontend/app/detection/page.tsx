@@ -1,11 +1,11 @@
 "use client";
 
-import React, { useState, useRef, useCallback, useEffect } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import Image from "next/image";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 type PermissionState = "prompt" | "granted" | "denied" | "requesting" | "unsupported";
 
@@ -55,15 +55,27 @@ export default function DetectionPage() {
   const [isRealtimeMode, setIsRealtimeMode] = useState(false);
   const [fallDetected, setFallDetected] = useState(false);
   const [fallHistory, setFallHistory] = useState<{ time: Date; confidence: number }[]>([]);
+  const [isAudioEnabled, setIsAudioEnabled] = useState(true);
+  const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
+  const [isVideoMode, setIsVideoMode] = useState(false);
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+
+  // Audio ref for fall alert
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
   const [webcamPermission, setWebcamPermission] = useState<PermissionState>("prompt");
   const [showPermissionModal, setShowPermissionModal] = useState(false);
   const [showRealtimePermissionModal, setShowRealtimePermissionModal] = useState(false);
+
+  // Refs
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const realtimeCanvasRef = useRef<HTMLCanvasElement>(null);
   const animationFrameRef = useRef<number | null>(null);
   const pendingStreamRef = useRef<MediaStream | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const isWaitingForResponse = useRef(false);
 
   // Check webcam permission on mount
   useEffect(() => {
@@ -80,7 +92,7 @@ export default function DetectionPage() {
           try {
             const result = await navigator.permissions.query({ name: "camera" as PermissionName });
             setWebcamPermission(result.state as PermissionState);
-            
+
             // Listen for permission changes
             result.onchange = () => {
               setWebcamPermission(result.state as PermissionState);
@@ -106,6 +118,98 @@ export default function DetectionPage() {
       pendingStreamRef.current = null; // Clear after applying
     }
   }, [isWebcamActive, isRealtimeMode]);
+
+  // WebSocket connection management
+  useEffect(() => {
+    if (isRealtimeMode || isVideoMode) {
+      const wsUrl = "ws://127.0.0.1:8000/ws/predict"; // Using 127.0.0.1 to avoid localhost resolution issues
+      console.log("Connecting to WebSocket:", wsUrl);
+      const ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log("WebSocket connected");
+        isWaitingForResponse.current = false;
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.detections) {
+            // Map backend detections to frontend format
+            // Backend sends: box: [x1, y1, x2, y2], confidence, class_id, class_name
+            // We need to convert absolute coordinates to percentages relative to video size
+            if (videoRef.current) {
+              const videoW = videoRef.current.videoWidth;
+              const videoH = videoRef.current.videoHeight;
+
+              const newDetections: Detection[] = data.detections.map((d: any, index: number) => {
+                const [x1, y1, x2, y2] = d.box;
+                const w = x2 - x1;
+                const h = y2 - y1;
+
+                const label = d.class_name;
+                // distinct color for fall
+                const isFall = label.toLowerCase().includes("fall") || label.toLowerCase().includes("down");
+                const color = isFall ? "#ef4444" : (CLASS_COLORS[label] || CLASS_COLORS.default);
+
+                if (isFall) {
+                  setFallDetected(true);
+                  // Play audio alert
+                  if (isAudioEnabled && audioRef.current) {
+                    audioRef.current.play().catch(e => console.log("Audio play failed", e));
+                  }
+                }
+
+                return {
+                  id: index,
+                  label: d.class_name,
+                  confidence: d.confidence,
+                  x: (x1 / videoW) * 100,
+                  y: (y1 / videoH) * 100,
+                  width: (w / videoW) * 100,
+                  height: (h / videoH) * 100,
+                  color: color
+                };
+              });
+
+              setDetections(newDetections);
+
+              // Handle fall history
+              const hasFall = newDetections.some(d => d.label.toLowerCase().includes("fall") || d.label.toLowerCase().includes("down"));
+              if (hasFall) {
+                // Debounce history addition? 
+                // For now, let's just add it if we haven't recently.
+                // Actually this logic was inside render loop before.
+                // We can simplify: just setFallDetected(true).
+              } else {
+                setFallDetected(false);
+              }
+            }
+          }
+        } catch (e) {
+          console.error("Error parsing WS message:", e);
+        } finally {
+          isWaitingForResponse.current = false;
+        }
+      };
+
+      ws.onerror = (e) => {
+        console.error("WebSocket error:", e);
+        isWaitingForResponse.current = false;
+      };
+
+      ws.onclose = () => {
+        console.log("WebSocket disconnected");
+      };
+
+      wsRef.current = ws;
+
+      return () => {
+        ws.close();
+        wsRef.current = null;
+      };
+    }
+  }, [isRealtimeMode, isVideoMode]);
 
   // Simulate YOLO detection
   const simulateDetection = useCallback((imageSrc: string) => {
@@ -145,14 +249,34 @@ export default function DetectionPage() {
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const imageSrc = event.target?.result as string;
-        simulateDetection(imageSrc);
-      };
-      reader.readAsDataURL(file);
+      if (file.type.startsWith("video/")) {
+        const url = URL.createObjectURL(file);
+        setUploadedVideoUrl(url);
+        setIsVideoMode(true);
+        setIsWebcamActive(false);
+        setIsRealtimeMode(false);
+        setSelectedImage(null);
+        setDetections([]);
+      } else {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const imageSrc = event.target?.result as string;
+          simulateDetection(imageSrc);
+        };
+        reader.readAsDataURL(file);
+      }
     }
   };
+
+  // Effect to load video when URL changes and mode is active
+  useEffect(() => {
+    if (isVideoMode && uploadedVideoUrl && videoRef.current) {
+      videoRef.current.src = uploadedVideoUrl;
+      videoRef.current.load();
+      // Optional: Auto-play is handled by autoPlay prop or onCanPlay
+      videoRef.current.play().catch(e => console.log("Auto-play failed:", e));
+    }
+  }, [isVideoMode, uploadedVideoUrl]);
 
   // Handle URL paste
   const handleUrlSubmit = () => {
@@ -200,19 +324,19 @@ export default function DetectionPage() {
   const startWebcam = async () => {
     setWebcamPermission("requesting");
     setShowPermissionModal(false);
-    
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
           width: { ideal: 1280 },
           height: { ideal: 720 },
           facingMode: "user"
-        } 
+        }
       });
-      
+
       // Store stream in ref for useEffect to pick up
       pendingStreamRef.current = stream;
-      
+
       // Set state to trigger video element render
       setIsWebcamActive(true);
       setSelectedImage(null);
@@ -220,7 +344,7 @@ export default function DetectionPage() {
       setWebcamPermission("granted");
     } catch (error) {
       console.error("Error accessing webcam:", error);
-      
+
       if (error instanceof DOMException) {
         if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
           setWebcamPermission("denied");
@@ -253,19 +377,19 @@ export default function DetectionPage() {
   const startRealtimeWebcam = async () => {
     setWebcamPermission("requesting");
     setShowRealtimePermissionModal(false);
-    
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
           width: { ideal: 1280 },
           height: { ideal: 720 },
           facingMode: "user"
-        } 
+        }
       });
-      
+
       // Store stream in ref for useEffect to pick up
       pendingStreamRef.current = stream;
-      
+
       // Set state to trigger video element render
       setIsRealtimeMode(true);
       setIsWebcamActive(true);
@@ -302,9 +426,9 @@ export default function DetectionPage() {
     // Simulate detection - in real app, this would call YOLO model
     const hasPerson = Math.random() > 0.1; // 90% chance to detect person
     const isFall = Math.random() < 0.03; // 3% chance of fall per frame
-    
+
     const newDetections: Detection[] = [];
-    
+
     if (hasPerson) {
       const personDetection: Detection = {
         id: 0,
@@ -317,97 +441,118 @@ export default function DetectionPage() {
         color: isFall ? "#ef4444" : "#8b5cf6",
       };
       newDetections.push(personDetection);
-      
+
       if (isFall && !fallDetected) {
         setFallDetected(true);
         setFallHistory(prev => [...prev, { time: new Date(), confidence: personDetection.confidence }]);
-        
+
         // Reset fall detection after 3 seconds
         setTimeout(() => setFallDetected(false), 3000);
       }
     }
-    
+
     return newDetections;
   }, [fallDetected]);
 
-  // Real-time detection loop
+  // Real-time detection loop (Webcam or Video)
   useEffect(() => {
-    if (!isRealtimeMode || !videoRef.current) return;
+    if ((!isRealtimeMode && !isVideoMode) || !videoRef.current) return;
 
     const canvas = realtimeCanvasRef.current;
     if (!canvas) return;
-    
+
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
     const runDetection = () => {
-      if (!videoRef.current || !isRealtimeMode) return;
-      
+      if (!videoRef.current || (!isRealtimeMode && !isVideoMode)) return;
+
+      // Ensure video is playing for video mode
+      if (isVideoMode && videoRef.current.paused) {
+        animationFrameRef.current = requestAnimationFrame(runDetection);
+        return;
+      }
+
       // Set canvas size to match video
-      canvas.width = videoRef.current.videoWidth || 640;
-      canvas.height = videoRef.current.videoHeight || 480;
-      
+      if (canvas.width !== videoRef.current.videoWidth) {
+        canvas.width = videoRef.current.videoWidth || 640;
+        canvas.height = videoRef.current.videoHeight || 480;
+      }
+
       // Draw video frame
-      ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      
-      // Get detections
-      const currentDetections = detectFallInFrame();
-      
-      // Draw detection boxes
-      currentDetections.forEach((det) => {
+      ctx.save();
+      ctx.scale(-1, 1);
+      ctx.drawImage(videoRef.current, -canvas.width, 0, canvas.width, canvas.height);
+      ctx.restore();
+
+      // Send frame to WebSocket if ready
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isWaitingForResponse.current) {
+        isWaitingForResponse.current = true;
+        canvas.toBlob((blob) => {
+          if (blob && wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(blob);
+          } else {
+            isWaitingForResponse.current = false;
+          }
+        }, 'image/jpeg', 0.8);
+      }
+
+      // Draw detection boxes (from state)
+      // currentDetections is now `detections` state
+      detections.forEach((det) => {
         const x = (det.x / 100) * canvas.width;
         const y = (det.y / 100) * canvas.height;
         const w = (det.width / 100) * canvas.width;
         const h = (det.height / 100) * canvas.height;
-        
+
         // Draw bounding box
         ctx.strokeStyle = det.color;
-        ctx.lineWidth = det.label === "FALL DETECTED" ? 4 : 2;
+        ctx.lineWidth = det.label.toLowerCase().includes("fall") ? 4 : 2;
         ctx.strokeRect(x, y, w, h);
-        
+
         // Pulsing effect for fall
-        if (det.label === "FALL DETECTED") {
+        if (det.label.toLowerCase().includes("fall")) {
           const pulse = Math.sin(Date.now() / 100) * 0.3 + 0.7;
           ctx.globalAlpha = pulse;
           ctx.strokeRect(x - 2, y - 2, w + 4, h + 4);
           ctx.globalAlpha = 1;
         }
-        
+
         // Draw label
         const label = `${det.label} ${(det.confidence * 100).toFixed(0)}%`;
         ctx.font = "bold 14px Arial";
         const textWidth = ctx.measureText(label).width;
-        
+
         ctx.fillStyle = det.color;
         ctx.fillRect(x, y - 22, textWidth + 10, 20);
-        
+
         ctx.fillStyle = "#ffffff";
         ctx.fillText(label, x + 5, y - 6);
       });
-      
+
       // Draw timestamp
       ctx.fillStyle = "#ffffff";
       ctx.font = "12px monospace";
       const time = new Date().toLocaleTimeString("vi-VN");
       ctx.fillText(`LIVE | ${time}`, 10, canvas.height - 10);
-      
+
       // Draw status indicator
       ctx.fillStyle = fallDetected ? "#ef4444" : "#22c55e";
       ctx.beginPath();
       ctx.arc(canvas.width - 15, 15, 8, 0, Math.PI * 2);
       ctx.fill();
-      
+
       animationFrameRef.current = requestAnimationFrame(runDetection);
     };
-    
+
     runDetection();
-    
+
     return () => {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [isRealtimeMode, detectFallInFrame, fallDetected]);
+  }, [isRealtimeMode, isVideoMode, detections, fallDetected]);
 
   // Capture webcam frame
   const captureFrame = () => {
@@ -428,13 +573,23 @@ export default function DetectionPage() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     const file = e.dataTransfer.files[0];
-    if (file && file.type.startsWith("image/")) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const imageSrc = event.target?.result as string;
-        simulateDetection(imageSrc);
-      };
-      reader.readAsDataURL(file);
+    if (file) {
+      if (file.type.startsWith("video/")) {
+        const url = URL.createObjectURL(file);
+        setUploadedVideoUrl(url);
+        setIsVideoMode(true);
+        setIsWebcamActive(false);
+        setIsRealtimeMode(false);
+        setSelectedImage(null);
+        setDetections([]);
+      } else if (file.type.startsWith("image/")) {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const imageSrc = event.target?.result as string;
+          simulateDetection(imageSrc);
+        };
+        reader.readAsDataURL(file);
+      }
     }
   };
 
@@ -474,12 +629,12 @@ export default function DetectionPage() {
                 {webcamPermission === "denied" ? (
                   <>
                     <p className="text-gray-600 mb-4">
-                      Bạn đã từ chối quyền truy cập camera. Để sử dụng tính năng này, 
+                      Bạn đã từ chối quyền truy cập camera. Để sử dụng tính năng này,
                       vui lòng cấp quyền trong cài đặt trình duyệt.
                     </p>
                     <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4">
                       <p className="text-sm text-yellow-800">
-                        <strong>Hướng dẫn:</strong> Click vào biểu tượng 🔒 trên thanh địa chỉ 
+                        <strong>Hướng dẫn:</strong> Click vào biểu tượng 🔒 trên thanh địa chỉ
                         → Cho phép Camera → Tải lại trang
                       </p>
                     </div>
@@ -561,12 +716,12 @@ export default function DetectionPage() {
                 {webcamPermission === "denied" ? (
                   <>
                     <p className="text-gray-600 mb-4">
-                      Bạn đã từ chối quyền truy cập camera. Để sử dụng tính năng này, 
+                      Bạn đã từ chối quyền truy cập camera. Để sử dụng tính năng này,
                       vui lòng cấp quyền trong cài đặt trình duyệt.
                     </p>
                     <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4">
                       <p className="text-sm text-yellow-800">
-                        <strong>Hướng dẫn:</strong> Click vào biểu tượng 🔒 trên thanh địa chỉ 
+                        <strong>Hướng dẫn:</strong> Click vào biểu tượng 🔒 trên thanh địa chỉ
                         → Cho phép Camera → Tải lại trang
                       </p>
                     </div>
@@ -574,7 +729,7 @@ export default function DetectionPage() {
                 ) : (
                   <>
                     <p className="text-gray-600 mb-4">
-                      Chế độ này sẽ sử dụng camera để <strong>phân tích trực tiếp</strong> và 
+                      Chế độ này sẽ sử dụng camera để <strong>phân tích trực tiếp</strong> và
                       phát hiện khi có người bị ngã.
                     </p>
                     <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 mb-4 text-left">
@@ -730,13 +885,12 @@ export default function DetectionPage() {
             <CardContent className="pt-4 space-y-2">
               <Button
                 variant="outline"
-                className={`w-full gap-2 ${
-                  webcamPermission === "denied" 
-                    ? "border-red-300 text-red-600 hover:bg-red-50" 
-                    : webcamPermission === "granted"
+                className={`w-full gap-2 ${webcamPermission === "denied"
+                  ? "border-red-300 text-red-600 hover:bg-red-50"
+                  : webcamPermission === "granted"
                     ? "border-green-300 text-green-600 hover:bg-green-50"
                     : ""
-                }`}
+                  }`}
                 onClick={toggleWebcam}
                 disabled={webcamPermission === "unsupported" || webcamPermission === "requesting"}
               >
@@ -747,15 +901,15 @@ export default function DetectionPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
                   </svg>
                 )}
-                {isWebcamActive 
-                  ? "Tắt Webcam" 
+                {isWebcamActive
+                  ? "Tắt Webcam"
                   : webcamPermission === "denied"
-                  ? "Quyền bị từ chối"
-                  : webcamPermission === "unsupported"
-                  ? "Không hỗ trợ"
-                  : webcamPermission === "requesting"
-                  ? "Đang yêu cầu..."
-                  : "Sử dụng Webcam"
+                    ? "Quyền bị từ chối"
+                    : webcamPermission === "unsupported"
+                      ? "Không hỗ trợ"
+                      : webcamPermission === "requesting"
+                        ? "Đang yêu cầu..."
+                        : "Sử dụng Webcam"
                 }
               </Button>
               {/* Permission status indicator */}
@@ -773,11 +927,10 @@ export default function DetectionPage() {
                 </p>
               )}
               <Button
-                className={`w-full gap-2 text-white ${
-                  isRealtimeMode 
-                    ? "bg-red-500 hover:bg-red-600" 
-                    : "bg-gradient-to-r from-purple-600 to-orange-500 hover:from-purple-700 hover:to-orange-600"
-                }`}
+                className={`w-full gap-2 text-white ${isRealtimeMode
+                  ? "bg-red-500 hover:bg-red-600"
+                  : "bg-gradient-to-r from-purple-600 to-orange-500 hover:from-purple-700 hover:to-orange-600"
+                  }`}
                 onClick={isRealtimeMode ? stopRealtimeDetection : startRealtimeDetection}
               >
                 {isRealtimeMode ? (
@@ -799,12 +952,27 @@ export default function DetectionPage() {
                 )}
               </Button>
               {isRealtimeMode && (
-                <div className="text-xs text-center text-orange-600 animate-pulse">
-                  🔴 Đang phân tích trực tiếp...
+                <div className="flex flex-col items-center gap-2 mt-2">
+                  <div className="text-xs text-center text-orange-600 animate-pulse">
+                    🔴 Đang phân tích trực tiếp...
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-gray-600">Cảnh báo âm thanh:</span>
+                    <Button
+                      size="sm"
+                      variant={isAudioEnabled ? "default" : "outline"}
+                      className="h-7 text-xs"
+                      onClick={() => setIsAudioEnabled(!isAudioEnabled)}
+                    >
+                      {isAudioEnabled ? "Bật" : "Tắt"}
+                    </Button>
+                  </div>
                 </div>
               )}
             </CardContent>
           </Card>
+
+          <audio ref={audioRef} src="https://assets.mixkit.co/sfx/preview/mixkit-alarm-digital-clock-beep-989.mp3" />
         </div>
 
         {/* Main Detection Area */}
@@ -885,41 +1053,55 @@ export default function DetectionPage() {
 
               <div className="relative flex-1 bg-gray-900 rounded-lg overflow-hidden flex items-center justify-center">
                 {/* Video Element - Rendered when webcam or realtime mode is active */}
-                {(isWebcamActive || isRealtimeMode) && (
+                {(isWebcamActive || isRealtimeMode || isVideoMode) && (
                   <video
                     ref={videoRef}
-                    autoPlay
+                    autoPlay={!isVideoMode}
+                    controls={isVideoMode}
                     playsInline
-                    muted={isRealtimeMode}
-                    className={`absolute inset-0 w-full h-full object-contain ${
-                      isRealtimeMode ? "opacity-0 pointer-events-none" : "z-10"
-                    }`}
+                    muted={isRealtimeMode && !isVideoMode} // Mute for webcam to avoid feedback, unzip for video
+                    className={`absolute inset-0 w-full h-full object-contain ${(isRealtimeMode && !isVideoMode) ? "transform -scale-x-100 opacity-0 pointer-events-none" : ""
+                      } ${
+                      // If video mode, we want to see the video controls, so z-index needs to be high enough but under canvas
+                      isVideoMode ? "z-10" : ""
+                      } ${
+                      // If webcam, video element is hidden in realtime mode (we draw on canvas?) 
+                      // Wait, in previous code: isRealtimeMode ? "opacity-0..." : "z-10"
+                      // Actually, in realtime mode we draw video to canvas?
+                      // Line 451: ctx.drawImage(videoRef.current, ...)
+                      // Yes, so we hide the video element in realtime webcam mode.
+                      // But for Video Mode, we probably want to see the video element (native controls)
+                      // And overlay the canvas on top.
+                      (isRealtimeMode && !isVideoMode) ? "opacity-0 pointer-events-none" : "z-10"
+                      }`}
+                    onPlay={() => setIsVideoPlaying(true)}
+                    onPause={() => setIsVideoPlaying(false)}
                   />
                 )}
 
                 {/* Canvas for Real-time Fall Detection - overlays video */}
-                {isRealtimeMode && (
+                {(isRealtimeMode || isVideoMode) && (
                   <canvas
                     ref={realtimeCanvasRef}
-                    className="absolute inset-0 w-full h-full object-contain z-10"
+                    className="absolute inset-0 w-full h-full object-contain z-20 pointer-events-none"
                   />
                 )}
 
                 {/* Real-time Fall Detection Mode Overlays */}
-                {isRealtimeMode && (
+                {(isRealtimeMode || isVideoMode) && (
                   <>
-                    
+
                     {/* Fall Alert Overlay */}
                     {fallDetected && (
-                      <div className="absolute inset-0 border-4 border-red-500 animate-pulse pointer-events-none">
+                      <div className="absolute inset-0 border-4 border-red-500 animate-pulse pointer-events-none z-50">
                         <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-red-500 text-white px-6 py-3 rounded-lg text-xl font-bold animate-bounce">
                           ⚠️ PHÁT HIỆN NGÃ!
                         </div>
                       </div>
                     )}
-                    
+
                     {/* Controls */}
-                    <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-3">
+                    <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-3 z-50">
                       <Button
                         onClick={stopRealtimeDetection}
                         className="bg-red-500 hover:bg-red-600 text-white gap-2"
@@ -931,9 +1113,9 @@ export default function DetectionPage() {
                         Dừng
                       </Button>
                     </div>
-                    
+
                     {/* Status bar */}
-                    <div className="absolute top-4 left-4 flex gap-2">
+                    <div className="absolute top-4 left-4 flex gap-2 z-50">
                       <Badge className="bg-red-500 text-white animate-pulse">
                         🔴 LIVE
                       </Badge>
@@ -941,10 +1123,10 @@ export default function DetectionPage() {
                         {fallDetected ? "⚠️ NGÃ!" : "✓ Bình thường"}
                       </Badge>
                     </div>
-                    
+
                     {/* Fall history */}
                     {fallHistory.length > 0 && (
-                      <div className="absolute top-4 right-4 bg-black/70 rounded-lg p-3 max-w-[200px]">
+                      <div className="absolute top-4 right-4 bg-black/70 rounded-lg p-3 max-w-[200px] z-50">
                         <p className="text-white text-xs font-semibold mb-2">Lịch sử phát hiện:</p>
                         <div className="space-y-1 max-h-[120px] overflow-y-auto">
                           {fallHistory.slice(-5).reverse().map((fall, i) => (
@@ -984,7 +1166,7 @@ export default function DetectionPage() {
                         className="object-contain"
                         unoptimized
                       />
-                      
+
                       {/* Processing overlay */}
                       {isProcessing && (
                         <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
