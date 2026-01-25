@@ -1,4 +1,5 @@
 import io
+import json
 import os
 
 import uvicorn
@@ -41,7 +42,7 @@ def read_root():
 
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...)):
+async def predict(file: UploadFile = File(...), conf: float = 0.5):
     if model is None:
         return {"error": "Model not loaded"}
 
@@ -50,7 +51,7 @@ async def predict(file: UploadFile = File(...)):
     image = Image.open(io.BytesIO(contents))
 
     # Run inference
-    results = model(image)
+    results = model(image, conf=conf)
 
     # Process results
     # YOLO results are a list (one for each image in the batch)
@@ -80,44 +81,62 @@ async def websocket_predict(websocket: WebSocket):
     await websocket.accept()
     print("WebSocket client connected")
 
+    # Default config
+    conf = 0.5
+
     if model is None:
         await websocket.close(code=1011, reason="Model not loaded")
         return
 
     try:
         while True:
-            # Receive bytes (frame) from client
-            data = await websocket.receive_bytes()
+            # Receive data
+            data = await websocket.receive()
 
-            # Process image
-            try:
-                image = Image.open(io.BytesIO(data))
+            if "text" in data:
+                # Handle config update
+                try:
+                    config = json.loads(data["text"])
+                    if "conf" in config:
+                        conf = float(config["conf"])
+                        print(f"Updated confidence threshold to: {conf}")
+                    continue
+                except Exception as e:
+                    print(f"Error parsing config: {e}")
+                    continue
 
-                # Run inference
-                results = model(image, verbose=False)  # verbose=False to reduce logs
-                result = results[0]
+            if "bytes" in data:
+                # Process image
+                try:
+                    image_data = data["bytes"]
+                    image = Image.open(io.BytesIO(image_data))
 
-                detections = []
-                for box in result.boxes:
-                    xyxy = box.xyxy[0].tolist()
-                    confidence = float(box.conf[0])
-                    class_id = int(box.cls[0])
+                    # Run inference
+                    # verbose=False to reduce logs
+                    results = model(image, conf=conf, verbose=False)
+                    result = results[0]
 
-                    detections.append(
-                        {
-                            "box": xyxy,
-                            "confidence": confidence,
-                            "class_id": class_id,
-                            "class_name": result.names[class_id],
-                        }
-                    )
+                    detections = []
+                    for box in result.boxes:
+                        xyxy = box.xyxy[0].tolist()
+                        confidence = float(box.conf[0])
+                        class_id = int(box.cls[0])
 
-                # Send results back as JSON
-                await websocket.send_json({"detections": detections})
+                        detections.append(
+                            {
+                                "box": xyxy,
+                                "confidence": confidence,
+                                "class_id": class_id,
+                                "class_name": result.names[class_id],
+                            }
+                        )
 
-            except Exception as e:
-                print(f"Error processing frame: {e}")
-                await websocket.send_json({"error": str(e)})
+                    # Send results back as JSON
+                    await websocket.send_json({"detections": detections})
+
+                except Exception as e:
+                    print(f"Error processing frame: {e}")
+                    await websocket.send_json({"error": str(e)})
 
     except WebSocketDisconnect:
         print("WebSocket client disconnected")

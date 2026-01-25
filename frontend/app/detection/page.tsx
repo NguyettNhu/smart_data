@@ -129,6 +129,13 @@ export default function DetectionPage() {
       ws.onopen = () => {
         console.log("WebSocket connected");
         isWaitingForResponse.current = false;
+
+        // Send initial configuration
+        const savedThreshold = localStorage.getItem("detection-threshold");
+        const conf = savedThreshold ? parseInt(savedThreshold) / 100 : 0.70; // 0.70 default to match settings default
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ conf }));
+        }
       };
 
       ws.onmessage = (event) => {

@@ -1,13 +1,13 @@
 "use client";
 
-import React, { useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
-import { Slider } from "@/components/ui/slider";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useEffect, useState } from "react";
 
 interface Camera {
   id: string;
@@ -19,13 +19,27 @@ interface Camera {
 
 export function SettingsPanel() {
   const [threshold, setThreshold] = useState([70]);
+
+  // Load threshold from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem("detection-threshold");
+    if (saved) {
+      setThreshold([parseInt(saved)]);
+    }
+  }, []);
+
+  // Save threshold to localStorage when changed
+  const handleThresholdChange = (value: number[]) => {
+    setThreshold(value);
+    localStorage.setItem("detection-threshold", value[0].toString());
+  };
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [emailEnabled, setEmailEnabled] = useState(false);
   const [telegramEnabled, setTelegramEnabled] = useState(true);
   const [email, setEmail] = useState("");
   const [telegramId, setTelegramId] = useState("");
   const [activeTab, setActiveTab] = useState("detection");
-  
+
   const [cameras, setCameras] = useState<Camera[]>([
     {
       id: "cam-1",
@@ -89,7 +103,7 @@ export function SettingsPanel() {
                 </div>
                 <Slider
                   value={threshold}
-                  onValueChange={setThreshold}
+                  onValueChange={handleThresholdChange}
                   min={50}
                   max={99}
                   step={1}
@@ -102,25 +116,6 @@ export function SettingsPanel() {
                 </div>
               </div>
 
-              <div className="pt-4 border-t space-y-4">
-                <h4 className="font-medium">Các class phát hiện</h4>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-3 rounded-full bg-green-500" />
-                      <span className="text-sm">Person</span>
-                    </div>
-                    <Switch checked={true} onCheckedChange={() => {}} />
-                  </div>
-                  <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-3 rounded-full bg-red-500" />
-                      <span className="text-sm">Fall</span>
-                    </div>
-                    <Switch checked={true} onCheckedChange={() => {}} />
-                  </div>
-                </div>
-              </div>
             </CardContent>
           </Card>
 
@@ -173,11 +168,10 @@ export function SettingsPanel() {
                   >
                     <div className="flex items-center gap-4">
                       <div
-                        className={`w-3 h-3 rounded-full ${
-                          camera.status === "connected"
-                            ? "bg-green-500"
-                            : "bg-red-500"
-                        }`}
+                        className={`w-3 h-3 rounded-full ${camera.status === "connected"
+                          ? "bg-green-500"
+                          : "bg-red-500"
+                          }`}
                       />
                       <div>
                         <p className="font-medium">{camera.name}</p>
@@ -458,7 +452,7 @@ export function SettingsPanel() {
             </CardContent>
           </Card>
         </TabsContent>
-      </Tabs>
-    </div>
+      </Tabs >
+    </div >
   );
 }
