@@ -1,46 +1,57 @@
 "use client";
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import { VideoStream } from "@/components/dashboard/video-stream";
 import { AlertHistory, AlertEvent } from "@/components/dashboard/alert-history";
 import { StatsHeader } from "@/components/dashboard/stats-header";
 import { SnapshotGallery, Snapshot } from "@/components/dashboard/snapshot-gallery";
+import { API_BASE, apiUrl } from "@/lib/api";
 
 export default function DashboardPage() {
-  const [alerts, setAlerts] = useState<AlertEvent[]>([
-    {
-      id: "1",
-      timestamp: new Date(Date.now() - 1000 * 60 * 5),
-      camera: "Camera 01 - Phòng khách",
-      type: "fall",
-      confidence: 0.95,
-      snapshot: "snapshot-1",
-      acknowledged: true,
-    },
-    {
-      id: "2",
-      timestamp: new Date(Date.now() - 1000 * 60 * 30),
-      camera: "Camera 01 - Phòng khách",
-      type: "warning",
-      confidence: 0.72,
-      acknowledged: true,
-    },
-  ]);
+  const [alerts, setAlerts] = useState<AlertEvent[]>([]);
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
 
-  const [snapshots, setSnapshots] = useState<Snapshot[]>([
-    {
-      id: "snap-1",
-      timestamp: new Date(Date.now() - 1000 * 60 * 5),
-      camera: "Camera 01",
-      confidence: 0.95,
-    },
-    {
-      id: "snap-2",
-      timestamp: new Date(Date.now() - 1000 * 60 * 60),
-      camera: "Camera 01",
-      confidence: 0.89,
-    },
-  ]);
+  useEffect(() => {
+    // Fetch snapshots from backend
+    const fetchSnapshots = async () => {
+      try {
+        const res = await fetch(apiUrl(`/api/snapshots?t=${Date.now()}`), {
+          cache: 'no-store'
+        });
+        if (res.ok) {
+          const data = await res.json();
+          
+          // Map to Snapshots
+          const mappedSnapshots: Snapshot[] = data.map((d: any) => ({
+            id: d.id.toString(),
+            timestamp: new Date(d.timestamp),
+            camera: "Camera 01", 
+            confidence: d.confidence,
+            imageData: `${API_BASE}${d.image_path}`, 
+          }));
+          setSnapshots(mappedSnapshots);
+
+          // Map to Alerts
+          const mappedAlerts: AlertEvent[] = data.map((d: any) => ({
+            id: `alert-${d.id}`,
+            timestamp: new Date(d.timestamp),
+            camera: "Camera 01 - Phòng khách",
+            type: "fall",
+            confidence: d.confidence,
+            snapshot: `${API_BASE}${d.image_path}`,
+            acknowledged: true, // Backend stored detections are historical
+          }));
+          setAlerts(mappedAlerts);
+        }
+      } catch (error) {
+        console.error("Failed to fetch snapshots:", error);
+      }
+    };
+
+    fetchSnapshots();
+    const interval = setInterval(fetchSnapshots, 5000); // Poll every 5s
+    return () => clearInterval(interval);
+  }, []);
 
   const [fallsToday, setFallsToday] = useState(2);
   const [alarmEnabled, setAlarmEnabled] = useState(true);
@@ -59,15 +70,6 @@ export default function DashboardPage() {
     
     setAlerts((prev) => [newAlert, ...prev.slice(0, 49)]);
     setFallsToday((prev) => prev + 1);
-    
-    // Add snapshot
-    const newSnapshot: Snapshot = {
-      id: `snap-${Date.now()}`,
-      timestamp: new Date(),
-      camera: "Camera 01",
-      confidence: detection.confidence,
-    };
-    setSnapshots((prev) => [newSnapshot, ...prev.slice(0, 11)]);
   }, []);
 
   const handleAcknowledge = useCallback((id: string) => {
@@ -86,12 +88,30 @@ export default function DashboardPage() {
     // TODO: Implement snapshot viewer
   }, []);
 
-  const handleDeleteSnapshot = useCallback((id: string) => {
+  const handleDeleteSnapshot = useCallback(async (id: string) => {
+    // 1. Filter locally first for better UX
     setSnapshots((prev) => prev.filter((s) => s.id !== id));
+
+    // 2. If it's a backend ID (numeric), call delete API
+    if (!id.startsWith('snap-')) {
+      try {
+        const res = await fetch(apiUrl(`/api/snapshots/${id}`), {
+          method: 'DELETE',
+        });
+        if (!res.ok) {
+          console.error("Failed to delete snapshot from backend");
+          // Re-fetch to sync if failed
+          // fetchSnapshots() would be better but it's inside useEffect
+        }
+      } catch (error) {
+        console.error("Error deleting snapshot:", error);
+      }
+    }
   }, []);
 
   // Handle snapshot capture from video stream
   const handleSnapshotCapture = useCallback((imageData: string, detection: { confidence: number }) => {
+    // Only add to local state if we want real-time feedback before the next poll
     const newSnapshot: Snapshot = {
       id: `snap-${Date.now()}`,
       timestamp: new Date(),

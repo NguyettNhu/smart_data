@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { apiUrl } from "@/lib/api";
 import { useEffect, useState } from "react";
 
 interface Camera {
@@ -19,6 +20,44 @@ interface Camera {
 
 export function SettingsPanel() {
   const [threshold, setThreshold] = useState([70]);
+
+  // System info component
+  const SystemInfoCpn = () => {
+    const [info, setInfo] = useState({
+      yolo_version: "Loading...",
+      model_size: "...",
+      device: "...",
+      fps: "..."
+    });
+
+    useEffect(() => {
+      fetch(apiUrl("/api/system/info"))
+        .then(res => res.json())
+        .then(data => setInfo(data))
+        .catch(err => console.error(err));
+    }, []);
+
+    return (
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="p-4 bg-gray-50 rounded-lg">
+          <p className="text-sm text-gray-500">Phiên bản YOLO</p>
+          <p className="font-medium">{info.yolo_version}</p>
+        </div>
+        <div className="p-4 bg-gray-50 rounded-lg">
+          <p className="text-sm text-gray-500">Model size</p>
+          <p className="font-medium">{info.model_size}</p>
+        </div>
+        <div className="p-4 bg-gray-50 rounded-lg">
+          <p className="text-sm text-gray-500">Inference device</p>
+          <p className="font-medium">{info.device}</p>
+        </div>
+        <div className="p-4 bg-gray-50 rounded-lg">
+          <p className="text-sm text-gray-500">FPS trung bình</p>
+          <p className="font-medium">{info.fps}</p>
+        </div>
+      </div>
+    );
+  };
 
   // Load threshold from localStorage on mount
   useEffect(() => {
@@ -377,29 +416,12 @@ export function SettingsPanel() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="p-4 bg-gray-50 rounded-lg">
-                  <p className="text-sm text-gray-500">Phiên bản YOLO</p>
-                  <p className="font-medium">YOLOv8n (Custom trained)</p>
-                </div>
-                <div className="p-4 bg-gray-50 rounded-lg">
-                  <p className="text-sm text-gray-500">Model size</p>
-                  <p className="font-medium">6.3 MB</p>
-                </div>
-                <div className="p-4 bg-gray-50 rounded-lg">
-                  <p className="text-sm text-gray-500">Inference device</p>
-                  <p className="font-medium">CUDA (GPU)</p>
-                </div>
-                <div className="p-4 bg-gray-50 rounded-lg">
-                  <p className="text-sm text-gray-500">FPS trung bình</p>
-                  <p className="font-medium">30 FPS</p>
-                </div>
-              </div>
+              <SystemInfoCpn />
 
               <div className="mt-6 pt-4 border-t">
                 <h4 className="font-medium mb-3">Hành động</h4>
                 <div className="flex gap-3">
-                  <Button variant="outline">
+                  <Button variant="outline" onClick={() => window.open(apiUrl("/api/system/logs"), "_blank")}>
                     <svg
                       className="w-4 h-4 mr-2"
                       fill="none"
@@ -415,7 +437,16 @@ export function SettingsPanel() {
                     </svg>
                     Export Logs
                   </Button>
-                  <Button variant="outline">
+                  <Button variant="outline" onClick={async () => {
+                    if (confirm("Bạn có chắc chắn muốn khởi động lại hệ thống?")) {
+                      try {
+                        await fetch(apiUrl("/api/system/restart"), { method: "POST" });
+                        alert("Hệ thống đang khởi động lại...");
+                      } catch (e) {
+                         alert("Lỗi: " + e);
+                      }
+                    }
+                  }}>
                     <svg
                       className="w-4 h-4 mr-2"
                       fill="none"
@@ -431,7 +462,17 @@ export function SettingsPanel() {
                     </svg>
                     Restart System
                   </Button>
-                  <Button variant="destructive">
+                  <Button variant="destructive" onClick={async () => {
+                    if (confirm("CẢNH BÁO: Tất cả dữ liệu lịch sử và snapshot sẽ bị xóa vĩnh viễn!")) {
+                      try {
+                        const res = await fetch(apiUrl("/api/system/clear-data"), { method: "POST" });
+                        if (res.ok) alert("Đã xóa dữ liệu thành công.");
+                        else alert("Xóa dữ liệu thất bại.");
+                      } catch (e) {
+                        alert("Lỗi: " + e);
+                      }
+                    }
+                  }}>
                     <svg
                       className="w-4 h-4 mr-2"
                       fill="none"

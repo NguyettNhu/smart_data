@@ -6,23 +6,25 @@ import { LineChart } from "@/components/analytics/line-chart";
 import { HeatmapChart } from "@/components/analytics/heatmap-chart";
 import { ModelMetrics } from "@/components/analytics/model-metrics";
 import { Badge } from "@/components/ui/badge";
+import { apiUrl } from "@/lib/api";
 
 export default function AnalyticsPage() {
-  // Sample data for line chart - Falls by hour
-  const hourlyFallData = [
+  // Hourly fall data will come from API
+  const defaultHourlyData = [
     { hour: "00:00", falls: 0 },
-    { hour: "02:00", falls: 1 },
+    { hour: "02:00", falls: 0 },
     { hour: "04:00", falls: 0 },
-    { hour: "06:00", falls: 2 },
-    { hour: "08:00", falls: 1 },
+    { hour: "06:00", falls: 0 },
+    { hour: "08:00", falls: 0 },
     { hour: "10:00", falls: 0 },
-    { hour: "12:00", falls: 1 },
+    { hour: "12:00", falls: 0 },
     { hour: "14:00", falls: 0 },
-    { hour: "16:00", falls: 1 },
-    { hour: "18:00", falls: 2 },
-    { hour: "20:00", falls: 3 },
-    { hour: "22:00", falls: 2 },
+    { hour: "16:00", falls: 0 },
+    { hour: "18:00", falls: 0 },
+    { hour: "20:00", falls: 0 },
+    { hour: "22:00", falls: 0 },
   ];
+
 
   // Sample data for heatmap - Fall locations in room
   const heatmapData = [
@@ -38,13 +40,44 @@ export default function AnalyticsPage() {
     { x: 3, y: 3, value: 3 },
   ];
 
-  // Summary stats
+  // State for stats
+  const [statsData, setStatsData] = React.useState({
+    total_falls: 0,
+    weekly_falls: 0,
+    weekly_change: 0,
+    accuracy: 0.0,
+    response_time: 0,
+    hourly_data: [] as { hour: string; falls: number }[],
+  });
+
+  // Fetch stats from backend
+  React.useEffect(() => {
+    const fetchStats = async () => {
+      try {
+        const res = await fetch(apiUrl("/api/stats"));
+        if (res.ok) {
+          const data = await res.json();
+          setStatsData(data);
+        }
+      } catch (error) {
+        console.error("Failed to fetch stats:", error);
+      }
+    };
+
+    fetchStats();
+    // Refresh every 10 seconds
+    const interval = setInterval(fetchStats, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Summary stats with real data
   const stats = [
-    { label: "Tổng số lần ngã", value: "47", change: "+12%", isUp: true },
-    { label: "Ngã tuần này", value: "8", change: "-25%", isUp: false },
-    { label: "Thời gian phản hồi TB", value: "2.3s", change: "-15%", isUp: false },
-    { label: "Độ chính xác phát hiện", value: "94.2%", change: "+2.1%", isUp: true },
+    { label: "Tổng số lần ngã", value: statsData.total_falls.toString(), change: `+${statsData.total_falls}`, isUp: true },
+    { label: "Ngã tuần này", value: statsData.weekly_falls.toString(), change: `${statsData.weekly_change >= 0 ? '+' : ''}${statsData.weekly_change}%`, isUp: statsData.weekly_change >= 0 },
+    { label: "Thời gian phản hồi TB", value: `${statsData.response_time.toFixed(1)}s`, change: "-15%", isUp: false },
+    { label: "Độ chính xác phát hiện", value: `${(statsData.accuracy * 100).toFixed(1)}%`, change: "+2.1%", isUp: true },
   ];
+
 
   return (
     <div className="space-y-6">
@@ -80,7 +113,7 @@ export default function AnalyticsPage() {
         <LineChart
           title="Tần suất ngã theo khung giờ"
           description="Phân tích số lần ngã theo từng khung giờ trong ngày (7 ngày gần nhất)"
-          data={hourlyFallData}
+          data={statsData.hourly_data.length > 0 ? statsData.hourly_data : defaultHourlyData}
         />
 
         {/* Heatmap - Fall Locations */}

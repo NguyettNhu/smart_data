@@ -2,10 +2,9 @@
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import Image from "next/image";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Card, CardContent } from "@/components/ui/card";
+import { wsUrl } from "@/lib/api";
+import React, { useEffect, useRef, useState } from "react";
 
 type PermissionState = "prompt" | "granted" | "denied" | "requesting" | "unsupported";
 
@@ -20,45 +19,24 @@ interface Detection {
   color: string;
 }
 
-const SAMPLE_IMAGES = [
-  { id: 1, src: "/samples/sample1.jpg", name: "Office" },
-  { id: 2, src: "/samples/sample2.jpg", name: "Street" },
-  { id: 3, src: "/samples/sample3.jpg", name: "Room" },
-  { id: 4, src: "/samples/sample4.jpg", name: "Park" },
-];
-
 const CLASS_COLORS: Record<string, string> = {
   person: "#8b5cf6",
-  laptop: "#3b82f6",
-  chair: "#22c55e",
-  phone: "#f97316",
-  bag: "#ec4899",
+  standing: "#22c55e",
+  sitting: "#3b82f6",
+  fallen: "#ef4444",
+  falling: "#f97316",
   default: "#6366f1",
 };
 
-const CLASS_LABELS: Record<number, string> = {
-  0: "person",
-  1: "bicycle",
-  2: "car",
-  3: "laptop",
-  4: "phone",
-  5: "chair",
-  6: "bag",
-};
-
 export default function DetectionPage() {
-  const [selectedImage, setSelectedImage] = useState<string | null>(null);
-  const [imageUrl, setImageUrl] = useState("");
   const [detections, setDetections] = useState<Detection[]>([]);
-  const [isProcessing, setIsProcessing] = useState(false);
   const [isWebcamActive, setIsWebcamActive] = useState(false);
   const [isRealtimeMode, setIsRealtimeMode] = useState(false);
-  const [fallDetected, setFallDetected] = useState(false);
-  const [fallHistory, setFallHistory] = useState<{ time: Date; confidence: number }[]>([]);
-  const [isAudioEnabled, setIsAudioEnabled] = useState(true);
-  const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
   const [isVideoMode, setIsVideoMode] = useState(false);
-  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
+  const [fallDetected, setFallDetected] = useState(false);
+  const [fallHistory] = useState<{ time: Date; confidence: number }[]>([]);
+  const [isAudioEnabled, setIsAudioEnabled] = useState(true);
 
   // Audio ref for fall alert
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -68,10 +46,10 @@ export default function DetectionPage() {
   const [showRealtimePermissionModal, setShowRealtimePermissionModal] = useState(false);
 
   // Refs
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const realtimeCanvasRef = useRef<HTMLCanvasElement>(null);
+  const captureCanvasRef = useRef<HTMLCanvasElement>(null);
+  const videoFileInputRef = useRef<HTMLInputElement>(null);
   const animationFrameRef = useRef<number | null>(null);
   const pendingStreamRef = useRef<MediaStream | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -119,12 +97,12 @@ export default function DetectionPage() {
     }
   }, [isWebcamActive, isRealtimeMode]);
 
-  // WebSocket connection management
+  // WebSocket connection management (real-time webcam + uploaded video)
   useEffect(() => {
     if (isRealtimeMode || isVideoMode) {
-      const wsUrl = "ws://127.0.0.1:8000/ws/predict"; // Using 127.0.0.1 to avoid localhost resolution issues
-      console.log("Connecting to WebSocket:", wsUrl);
-      const ws = new WebSocket(wsUrl);
+      const wsEndpoint = wsUrl("/ws/predict");
+      console.log("Connecting to WebSocket:", wsEndpoint);
+      const ws = new WebSocket(wsEndpoint);
 
       ws.onopen = () => {
         console.log("WebSocket connected");
@@ -132,7 +110,10 @@ export default function DetectionPage() {
 
         // Send initial configuration
         const savedThreshold = localStorage.getItem("detection-threshold");
-        const conf = savedThreshold ? parseInt(savedThreshold) / 100 : 0.70; // 0.70 default to match settings default
+        let conf = savedThreshold ? parseInt(savedThreshold) / 100 : 0.70; // 0.70 default to match settings default
+        // Uploaded videos are often wide CCTV shots with small, distant people,
+        // so use a lower confidence to make sure they get detected.
+        if (isVideoMode) conf = Math.min(conf, 0.3);
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ conf }));
         }
@@ -181,14 +162,9 @@ export default function DetectionPage() {
 
               setDetections(newDetections);
 
-              // Handle fall history
+              // Update overall fall status
               const hasFall = newDetections.some(d => d.label.toLowerCase().includes("fall") || d.label.toLowerCase().includes("down"));
-              if (hasFall) {
-                // Debounce history addition? 
-                // For now, let's just add it if we haven't recently.
-                // Actually this logic was inside render loop before.
-                // We can simplify: just setFallDetected(true).
-              } else {
+              if (!hasFall) {
                 setFallDetected(false);
               }
             }
@@ -216,90 +192,9 @@ export default function DetectionPage() {
         wsRef.current = null;
       };
     }
-  }, [isRealtimeMode, isVideoMode]);
+  }, [isRealtimeMode, isVideoMode, isAudioEnabled]);
 
-  // Simulate YOLO detection
-  const simulateDetection = useCallback((imageSrc: string) => {
-    setIsProcessing(true);
-    setSelectedImage(imageSrc);
-    setDetections([]);
-
-    // Simulate processing delay
-    setTimeout(() => {
-      // Generate random detections
-      const numDetections = Math.floor(Math.random() * 4) + 1;
-      const newDetections: Detection[] = [];
-
-      for (let i = 0; i < numDetections; i++) {
-        const classId = Math.floor(Math.random() * 7);
-        const label = CLASS_LABELS[classId] || "object";
-        const color = CLASS_COLORS[label] || CLASS_COLORS.default;
-
-        newDetections.push({
-          id: i,
-          label,
-          confidence: 0.75 + Math.random() * 0.24,
-          x: 10 + Math.random() * 40,
-          y: 10 + Math.random() * 30,
-          width: 15 + Math.random() * 25,
-          height: 20 + Math.random() * 35,
-          color,
-        });
-      }
-
-      setDetections(newDetections);
-      setIsProcessing(false);
-    }, 1500);
-  }, []);
-
-  // Handle file upload
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      if (file.type.startsWith("video/")) {
-        const url = URL.createObjectURL(file);
-        setUploadedVideoUrl(url);
-        setIsVideoMode(true);
-        setIsWebcamActive(false);
-        setIsRealtimeMode(false);
-        setSelectedImage(null);
-        setDetections([]);
-      } else {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          const imageSrc = event.target?.result as string;
-          simulateDetection(imageSrc);
-        };
-        reader.readAsDataURL(file);
-      }
-    }
-  };
-
-  // Effect to load video when URL changes and mode is active
-  useEffect(() => {
-    if (isVideoMode && uploadedVideoUrl && videoRef.current) {
-      videoRef.current.src = uploadedVideoUrl;
-      videoRef.current.load();
-      // Optional: Auto-play is handled by autoPlay prop or onCanPlay
-      videoRef.current.play().catch(e => console.log("Auto-play failed:", e));
-    }
-  }, [isVideoMode, uploadedVideoUrl]);
-
-  // Handle URL paste
-  const handleUrlSubmit = () => {
-    if (imageUrl.trim()) {
-      simulateDetection(imageUrl);
-    }
-  };
-
-  // Handle sample image click
-  const handleSampleClick = (index: number) => {
-    // Use placeholder for demo
-    const placeholderUrl = `https://picsum.photos/seed/${index + 10}/800/600`;
-    simulateDetection(placeholderUrl);
-  };
-
-  // Handle webcam
+  // Handle webcam (live preview)
   const toggleWebcam = async () => {
     if (isWebcamActive) {
       // Stop webcam
@@ -308,7 +203,6 @@ export default function DetectionPage() {
         tracks.forEach((track) => track.stop());
       }
       setIsWebcamActive(false);
-      setSelectedImage(null);
     } else {
       // Check if unsupported
       if (webcamPermission === "unsupported") {
@@ -332,6 +226,13 @@ export default function DetectionPage() {
     setWebcamPermission("requesting");
     setShowPermissionModal(false);
 
+    // Switching away from an uploaded video
+    if (uploadedVideoUrl) {
+      URL.revokeObjectURL(uploadedVideoUrl);
+      setUploadedVideoUrl(null);
+    }
+    setIsVideoMode(false);
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -346,7 +247,6 @@ export default function DetectionPage() {
 
       // Set state to trigger video element render
       setIsWebcamActive(true);
-      setSelectedImage(null);
       setDetections([]);
       setWebcamPermission("granted");
     } catch (error) {
@@ -385,6 +285,13 @@ export default function DetectionPage() {
     setWebcamPermission("requesting");
     setShowRealtimePermissionModal(false);
 
+    // Switching away from an uploaded video
+    if (uploadedVideoUrl) {
+      URL.revokeObjectURL(uploadedVideoUrl);
+      setUploadedVideoUrl(null);
+    }
+    setIsVideoMode(false);
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -400,7 +307,6 @@ export default function DetectionPage() {
       // Set state to trigger video element render
       setIsRealtimeMode(true);
       setIsWebcamActive(true);
-      setSelectedImage(null);
       setDetections([]);
       setWebcamPermission("granted");
       setFallDetected(false);
@@ -416,6 +322,11 @@ export default function DetectionPage() {
 
   // Stop real-time detection
   const stopRealtimeDetection = () => {
+    // Send stop signal to backend
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ action: "stop" }));
+    }
+
     if (videoRef.current?.srcObject) {
       const tracks = (videoRef.current.srcObject as MediaStream).getTracks();
       tracks.forEach((track) => track.stop());
@@ -428,40 +339,73 @@ export default function DetectionPage() {
     setFallDetected(false);
   };
 
-  // Simulate fall detection on each frame
-  const detectFallInFrame = useCallback(() => {
-    // Simulate detection - in real app, this would call YOLO model
-    const hasPerson = Math.random() > 0.1; // 90% chance to detect person
-    const isFall = Math.random() < 0.03; // 3% chance of fall per frame
+  // ===== Fall detection on an uploaded video file =====
 
-    const newDetections: Detection[] = [];
-
-    if (hasPerson) {
-      const personDetection: Detection = {
-        id: 0,
-        label: isFall ? "FALL DETECTED" : "person",
-        confidence: 0.85 + Math.random() * 0.14,
-        x: 25 + Math.sin(Date.now() / 1000) * 10,
-        y: isFall ? 50 : 15,
-        width: isFall ? 35 : 20,
-        height: isFall ? 20 : 45,
-        color: isFall ? "#ef4444" : "#8b5cf6",
-      };
-      newDetections.push(personDetection);
-
-      if (isFall && !fallDetected) {
-        setFallDetected(true);
-        setFallHistory(prev => [...prev, { time: new Date(), confidence: personDetection.confidence }]);
-
-        // Reset fall detection after 3 seconds
-        setTimeout(() => setFallDetected(false), 3000);
-      }
+  const startVideoDetection = (file: File) => {
+    if (!file.type.startsWith("video/")) {
+      alert("Vui lòng chọn một tệp video hợp lệ.");
+      return;
     }
+    // Stop any active webcam/realtime stream first
+    if (videoRef.current?.srcObject) {
+      const tracks = (videoRef.current.srcObject as MediaStream).getTracks();
+      tracks.forEach((track) => track.stop());
+      videoRef.current.srcObject = null;
+    }
+    setIsWebcamActive(false);
+    setIsRealtimeMode(false);
 
-    return newDetections;
-  }, [fallDetected]);
+    if (uploadedVideoUrl) URL.revokeObjectURL(uploadedVideoUrl);
+    const url = URL.createObjectURL(file);
+    setUploadedVideoUrl(url);
+    setIsVideoMode(true);
+    setDetections([]);
+    setFallDetected(false);
+  };
 
-  // Real-time detection loop (Webcam or Video)
+  const handleVideoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) startVideoDetection(file);
+    e.target.value = ""; // allow re-selecting the same file
+  };
+
+  const handleVideoDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files?.[0];
+    if (file) startVideoDetection(file);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  // Stop video mode and release the object URL
+  const stopVideoMode = () => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ action: "stop" }));
+    }
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+    }
+    if (uploadedVideoUrl) {
+      URL.revokeObjectURL(uploadedVideoUrl);
+      setUploadedVideoUrl(null);
+    }
+    setIsVideoMode(false);
+    setDetections([]);
+    setFallDetected(false);
+  };
+
+  // Load the uploaded video into the player when it becomes active
+  useEffect(() => {
+    if (isVideoMode && uploadedVideoUrl && videoRef.current) {
+      videoRef.current.src = uploadedVideoUrl;
+      videoRef.current.load();
+      videoRef.current.play().catch((e) => console.log("Auto-play failed:", e));
+    }
+  }, [isVideoMode, uploadedVideoUrl]);
+
+  // Detection loop -- webcam (mirrored) or uploaded video, streams to backend
   useEffect(() => {
     if ((!isRealtimeMode && !isVideoMode) || !videoRef.current) return;
 
@@ -471,31 +415,10 @@ export default function DetectionPage() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const runDetection = () => {
-      if (!videoRef.current || (!isRealtimeMode && !isVideoMode)) return;
-
-      // Ensure video is playing for video mode
-      if (isVideoMode && videoRef.current.paused) {
-        animationFrameRef.current = requestAnimationFrame(runDetection);
-        return;
-      }
-
-      // Set canvas size to match video
-      if (canvas.width !== videoRef.current.videoWidth) {
-        canvas.width = videoRef.current.videoWidth || 640;
-        canvas.height = videoRef.current.videoHeight || 480;
-      }
-
-      // Draw video frame
-      ctx.save();
-      ctx.scale(-1, 1);
-      ctx.drawImage(videoRef.current, -canvas.width, 0, canvas.width, canvas.height);
-      ctx.restore();
-
-      // Send frame to WebSocket if ready
+    const sendFrame = (source: HTMLCanvasElement) => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isWaitingForResponse.current) {
         isWaitingForResponse.current = true;
-        canvas.toBlob((blob) => {
+        source.toBlob((blob) => {
           if (blob && wsRef.current?.readyState === WebSocket.OPEN) {
             wsRef.current.send(blob);
           } else {
@@ -503,9 +426,50 @@ export default function DetectionPage() {
           }
         }, 'image/jpeg', 0.8);
       }
+    };
+
+    const runDetection = () => {
+      const video = videoRef.current;
+      if (!video || (!isRealtimeMode && !isVideoMode)) return;
+
+      // Set canvas size to match the video frame
+      const vw = video.videoWidth || 640;
+      const vh = video.videoHeight || 480;
+      if (canvas.width !== vw) {
+        canvas.width = vw;
+        canvas.height = vh;
+      }
+
+      if (isRealtimeMode) {
+        // Webcam: draw the mirrored feed onto the visible canvas, then stream it
+        ctx.save();
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
+        ctx.restore();
+        sendFrame(canvas);
+      } else {
+        // Video: keep the overlay transparent (the native <video> shows through);
+        // grab frames from a hidden canvas so the overlay doesn't cover the video.
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // Keep analysing even when paused/ended so the held frame (e.g. the
+        // moment of the fall at the end of a clip) is still detected.
+        if (video.readyState >= 2) {
+          const cap = captureCanvasRef.current;
+          if (cap) {
+            if (cap.width !== vw) {
+              cap.width = vw;
+              cap.height = vh;
+            }
+            const cctx = cap.getContext("2d");
+            if (cctx) {
+              cctx.drawImage(video, 0, 0, vw, vh);
+              sendFrame(cap);
+            }
+          }
+        }
+      }
 
       // Draw detection boxes (from state)
-      // currentDetections is now `detections` state
       detections.forEach((det) => {
         const x = (det.x / 100) * canvas.width;
         const y = (det.y / 100) * canvas.height;
@@ -537,11 +501,13 @@ export default function DetectionPage() {
         ctx.fillText(label, x + 5, y - 6);
       });
 
-      // Draw timestamp
-      ctx.fillStyle = "#ffffff";
-      ctx.font = "12px monospace";
-      const time = new Date().toLocaleTimeString("vi-VN");
-      ctx.fillText(`LIVE | ${time}`, 10, canvas.height - 10);
+      // Draw timestamp (live webcam only)
+      if (isRealtimeMode) {
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "12px monospace";
+        const time = new Date().toLocaleTimeString("vi-VN");
+        ctx.fillText(`LIVE | ${time}`, 10, canvas.height - 10);
+      }
 
       // Draw status indicator
       ctx.fillStyle = fallDetected ? "#ef4444" : "#22c55e";
@@ -560,49 +526,6 @@ export default function DetectionPage() {
       }
     };
   }, [isRealtimeMode, isVideoMode, detections, fallDetected]);
-
-  // Capture webcam frame
-  const captureFrame = () => {
-    if (videoRef.current && canvasRef.current) {
-      const ctx = canvasRef.current.getContext("2d");
-      if (ctx) {
-        canvasRef.current.width = videoRef.current.videoWidth;
-        canvasRef.current.height = videoRef.current.videoHeight;
-        ctx.drawImage(videoRef.current, 0, 0);
-        const imageSrc = canvasRef.current.toDataURL("image/png");
-        simulateDetection(imageSrc);
-        toggleWebcam();
-      }
-    }
-  };
-
-  // Handle drag and drop
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    const file = e.dataTransfer.files[0];
-    if (file) {
-      if (file.type.startsWith("video/")) {
-        const url = URL.createObjectURL(file);
-        setUploadedVideoUrl(url);
-        setIsVideoMode(true);
-        setIsWebcamActive(false);
-        setIsRealtimeMode(false);
-        setSelectedImage(null);
-        setDetections([]);
-      } else if (file.type.startsWith("image/")) {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          const imageSrc = event.target?.result as string;
-          simulateDetection(imageSrc);
-        };
-        reader.readAsDataURL(file);
-      }
-    }
-  };
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-  };
 
   return (
     <div className="space-y-6">
@@ -792,101 +715,13 @@ export default function DetectionPage() {
 
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Phát hiện Đối tượng</h1>
-        <p className="text-gray-500">Tải ảnh lên để phát hiện đối tượng với YOLO</p>
+        <h1 className="text-2xl font-bold text-gray-900">Phát hiện Té ngã</h1>
+        <p className="text-gray-500">Giám sát và phát hiện té ngã trực tiếp qua webcam</p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
         {/* Left Sidebar */}
         <div className="lg:col-span-1 space-y-4">
-          {/* Sample Images */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-medium">Ảnh mẫu</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="grid grid-cols-4 gap-2">
-                {SAMPLE_IMAGES.map((sample, index) => (
-                  <button
-                    key={sample.id}
-                    onClick={() => handleSampleClick(index)}
-                    className="aspect-square rounded-lg overflow-hidden border-2 border-transparent hover:border-purple-500 transition-all relative bg-gray-100"
-                  >
-                    <Image
-                      src={`https://picsum.photos/seed/${index + 10}/100/100`}
-                      alt={sample.name}
-                      fill
-                      className="object-cover"
-                      unoptimized
-                    />
-                  </button>
-                ))}
-              </div>
-              <Button variant="ghost" className="w-full text-purple-600 hover:text-purple-700 text-sm">
-                Xem tất cả ảnh mẫu →
-              </Button>
-            </CardContent>
-          </Card>
-
-          {/* Upload File */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-medium">Tải ảnh hoặc video</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div
-                onDrop={handleDrop}
-                onDragOver={handleDragOver}
-                className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-purple-400 transition-colors cursor-pointer"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <p className="text-sm text-gray-500 mb-3">Kéo thả file vào đây hoặc</p>
-                <Button variant="outline" size="sm" className="gap-2">
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                  </svg>
-                  Chọn File
-                </Button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/*,video/*"
-                  onChange={handleFileUpload}
-                  className="hidden"
-                />
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Paste URL */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-medium">Dán URL ảnh</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <svg
-                    className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-                  </svg>
-                  <Input
-                    type="url"
-                    placeholder="Dán link ảnh..."
-                    value={imageUrl}
-                    onChange={(e) => setImageUrl(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleUrlSubmit()}
-                    className="pl-9"
-                  />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
           {/* Webcam */}
           <Card>
             <CardContent className="pt-4 space-y-2">
@@ -979,6 +814,47 @@ export default function DetectionPage() {
             </CardContent>
           </Card>
 
+          {/* Upload a video for fall detection */}
+          <Card>
+            <CardContent className="pt-4">
+              <p className="text-sm font-medium mb-2">Phát hiện ngã từ video</p>
+              <div
+                onDrop={handleVideoDrop}
+                onDragOver={handleDragOver}
+                className="border-2 border-dashed border-gray-300 rounded-lg p-5 text-center hover:border-emerald-400 transition-colors cursor-pointer"
+                onClick={() => videoFileInputRef.current?.click()}
+              >
+                <svg className="w-7 h-7 mx-auto mb-2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                </svg>
+                <p className="text-xs text-gray-500 mb-3">Kéo thả video vào đây hoặc</p>
+                <Button variant="outline" size="sm" className="gap-2">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                  </svg>
+                  Chọn video
+                </Button>
+              </div>
+              <input
+                ref={videoFileInputRef}
+                type="file"
+                accept="video/*"
+                onChange={handleVideoUpload}
+                className="hidden"
+              />
+              {isVideoMode && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full mt-2 border-red-300 text-red-600 hover:bg-red-50"
+                  onClick={stopVideoMode}
+                >
+                  Dừng video
+                </Button>
+              )}
+            </CardContent>
+          </Card>
+
           <audio ref={audioRef} src="https://assets.mixkit.co/sfx/preview/mixkit-alarm-digital-clock-beep-989.mp3" />
         </div>
 
@@ -988,24 +864,6 @@ export default function DetectionPage() {
             <CardContent className="p-4 h-full flex flex-col">
               {/* Mode tabs */}
               <div className="flex gap-2 mb-3">
-                <Button
-                  size="sm"
-                  variant={!isRealtimeMode && !isWebcamActive ? "default" : "outline"}
-                  className={!isRealtimeMode && !isWebcamActive ? "bg-purple-600 hover:bg-purple-700" : ""}
-                  onClick={() => {
-                    stopRealtimeDetection();
-                    if (videoRef.current?.srcObject) {
-                      const tracks = (videoRef.current.srcObject as MediaStream).getTracks();
-                      tracks.forEach((track) => track.stop());
-                    }
-                    setIsWebcamActive(false);
-                  }}
-                >
-                  <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                  </svg>
-                  Ảnh
-                </Button>
                 <Button
                   size="sm"
                   variant={isWebcamActive && !isRealtimeMode ? "default" : "outline"}
@@ -1036,12 +894,24 @@ export default function DetectionPage() {
                   </svg>
                   Phát hiện Ngã
                 </Button>
-                {(isWebcamActive || isRealtimeMode) && (
+                <Button
+                  size="sm"
+                  variant={isVideoMode ? "default" : "outline"}
+                  className={isVideoMode ? "bg-emerald-600 hover:bg-emerald-700" : ""}
+                  onClick={() => videoFileInputRef.current?.click()}
+                >
+                  <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                  Video
+                </Button>
+                {(isWebcamActive || isRealtimeMode || isVideoMode) && (
                   <Button
                     size="sm"
                     variant="destructive"
                     onClick={() => {
                       stopRealtimeDetection();
+                      stopVideoMode();
                       if (videoRef.current?.srcObject) {
                         const tracks = (videoRef.current.srcObject as MediaStream).getTracks();
                         tracks.forEach((track) => track.stop());
@@ -1059,34 +929,20 @@ export default function DetectionPage() {
               </div>
 
               <div className="relative flex-1 bg-gray-900 rounded-lg overflow-hidden flex items-center justify-center">
-                {/* Video Element - Rendered when webcam or realtime mode is active */}
+                {/* Video element - webcam stream or uploaded video */}
                 {(isWebcamActive || isRealtimeMode || isVideoMode) && (
                   <video
                     ref={videoRef}
                     autoPlay={!isVideoMode}
                     controls={isVideoMode}
                     playsInline
-                    muted={isRealtimeMode && !isVideoMode} // Mute for webcam to avoid feedback, unzip for video
-                    className={`absolute inset-0 w-full h-full object-contain ${(isRealtimeMode && !isVideoMode) ? "transform -scale-x-100 opacity-0 pointer-events-none" : ""
-                      } ${
-                      // If video mode, we want to see the video controls, so z-index needs to be high enough but under canvas
-                      isVideoMode ? "z-10" : ""
-                      } ${
-                      // If webcam, video element is hidden in realtime mode (we draw on canvas?) 
-                      // Wait, in previous code: isRealtimeMode ? "opacity-0..." : "z-10"
-                      // Actually, in realtime mode we draw video to canvas?
-                      // Line 451: ctx.drawImage(videoRef.current, ...)
-                      // Yes, so we hide the video element in realtime webcam mode.
-                      // But for Video Mode, we probably want to see the video element (native controls)
-                      // And overlay the canvas on top.
-                      (isRealtimeMode && !isVideoMode) ? "opacity-0 pointer-events-none" : "z-10"
+                    muted={!isVideoMode}
+                    className={`absolute inset-0 w-full h-full object-contain ${isRealtimeMode ? "opacity-0 pointer-events-none" : "z-10"
                       }`}
-                    onPlay={() => setIsVideoPlaying(true)}
-                    onPause={() => setIsVideoPlaying(false)}
                   />
                 )}
 
-                {/* Canvas for Real-time Fall Detection - overlays video */}
+                {/* Overlay canvas for detection boxes (webcam + video) */}
                 {(isRealtimeMode || isVideoMode) && (
                   <canvas
                     ref={realtimeCanvasRef}
@@ -1094,10 +950,14 @@ export default function DetectionPage() {
                   />
                 )}
 
-                {/* Real-time Fall Detection Mode Overlays */}
+                {/* Hidden canvas to grab frames from the uploaded video */}
+                {isVideoMode && (
+                  <canvas ref={captureCanvasRef} className="hidden" />
+                )}
+
+                {/* Fall Detection Mode Overlays (webcam + video) */}
                 {(isRealtimeMode || isVideoMode) && (
                   <>
-
                     {/* Fall Alert Overlay */}
                     {fallDetected && (
                       <div className="absolute inset-0 border-4 border-red-500 animate-pulse pointer-events-none z-50">
@@ -1107,7 +967,8 @@ export default function DetectionPage() {
                       </div>
                     )}
 
-                    {/* Controls */}
+                    {/* Floating stop control (webcam only -- video uses native controls) */}
+                    {isRealtimeMode && (
                     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-3 z-50">
                       <Button
                         onClick={stopRealtimeDetection}
@@ -1120,11 +981,12 @@ export default function DetectionPage() {
                         Dừng
                       </Button>
                     </div>
+                    )}
 
                     {/* Status bar */}
                     <div className="absolute top-4 left-4 flex gap-2 z-50">
                       <Badge className="bg-red-500 text-white animate-pulse">
-                        🔴 LIVE
+                        {isVideoMode ? "🎬 VIDEO" : "🔴 LIVE"}
                       </Badge>
                       <Badge className={fallDetected ? "bg-red-500 text-white" : "bg-green-500 text-white"}>
                         {fallDetected ? "⚠️ NGÃ!" : "✓ Bình thường"}
@@ -1147,80 +1009,8 @@ export default function DetectionPage() {
                   </>
                 )}
 
-                {/* Normal Webcam View Controls (not realtime mode) */}
-                {isWebcamActive && !isRealtimeMode && (
-                  <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20">
-                    <Button
-                      onClick={captureFrame}
-                      className="bg-red-500 hover:bg-red-600 text-white gap-2"
-                    >
-                      <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                        <circle cx="12" cy="12" r="10" />
-                      </svg>
-                      Chụp ảnh
-                    </Button>
-                  </div>
-                )}
-
-                {/* Selected Image with Detections */}
-                {selectedImage && !isWebcamActive && (
-                  <>
-                    <div className="relative w-full h-full">
-                      <Image
-                        src={selectedImage}
-                        alt="Detection target"
-                        fill
-                        className="object-contain"
-                        unoptimized
-                      />
-
-                      {/* Processing overlay */}
-                      {isProcessing && (
-                        <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-                          <div className="text-center text-white">
-                            <div className="w-12 h-12 border-4 border-white border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-                            <p>Đang phân tích...</p>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Detection Boxes */}
-                      {!isProcessing && detections.map((det) => (
-                        <div
-                          key={det.id}
-                          className="absolute border-2 pointer-events-none"
-                          style={{
-                            left: `${det.x}%`,
-                            top: `${det.y}%`,
-                            width: `${det.width}%`,
-                            height: `${det.height}%`,
-                            borderColor: det.color,
-                          }}
-                        >
-                          {/* Label */}
-                          <div
-                            className="absolute -top-6 left-0 px-2 py-0.5 text-xs font-medium text-white rounded-sm whitespace-nowrap"
-                            style={{ backgroundColor: det.color }}
-                          >
-                            {det.id} {det.label} {(det.confidence * 100).toFixed(0)}%
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Detection count badge */}
-                    {!isProcessing && detections.length > 0 && (
-                      <div className="absolute bottom-4 right-4">
-                        <Badge className="bg-purple-600 text-white px-3 py-1 text-sm">
-                          {detections.length} đối tượng phát hiện
-                        </Badge>
-                      </div>
-                    )}
-                  </>
-                )}
-
                 {/* Empty state */}
-                {!selectedImage && !isWebcamActive && !isRealtimeMode && (
+                {!isWebcamActive && !isRealtimeMode && !isVideoMode && (
                   <div className="text-center text-gray-400">
                     <svg
                       className="w-20 h-20 mx-auto mb-4"
@@ -1232,22 +1022,12 @@ export default function DetectionPage() {
                         strokeLinecap="round"
                         strokeLinejoin="round"
                         strokeWidth={1.5}
-                        d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                        d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"
                       />
                     </svg>
-                    <p className="text-lg font-medium mb-2">Chưa có ảnh nào</p>
-                    <p className="text-sm mb-4">Tải ảnh lên, dán URL, hoặc chọn ảnh mẫu để bắt đầu</p>
+                    <p className="text-lg font-medium mb-2">Chưa bật camera</p>
+                    <p className="text-sm mb-4">Bật camera để bắt đầu giám sát và phát hiện té ngã trực tiếp</p>
                     <div className="flex gap-3 justify-center">
-                      <Button
-                        variant="outline"
-                        className="gap-2 border-gray-500 text-gray-300 hover:bg-gray-800"
-                        onClick={() => fileInputRef.current?.click()}
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                        </svg>
-                        Tải ảnh
-                      </Button>
                       <Button
                         className="gap-2 bg-gradient-to-r from-purple-600 to-orange-500 hover:from-purple-700 hover:to-orange-600 text-white"
                         onClick={startRealtimeDetection}
@@ -1257,12 +1037,19 @@ export default function DetectionPage() {
                         </svg>
                         Bật Camera
                       </Button>
+                      <Button
+                        variant="outline"
+                        className="gap-2 border-gray-500 text-gray-300 hover:bg-gray-800"
+                        onClick={() => videoFileInputRef.current?.click()}
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                        </svg>
+                        Tải video
+                      </Button>
                     </div>
                   </div>
                 )}
-
-                {/* Hidden canvas for webcam capture */}
-                <canvas ref={canvasRef} className="hidden" />
               </div>
             </CardContent>
           </Card>

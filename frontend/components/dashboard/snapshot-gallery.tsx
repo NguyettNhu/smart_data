@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { apiUrl } from "@/lib/api";
 
 export interface Snapshot {
   id: string;
@@ -35,10 +36,25 @@ export function SnapshotGallery({ snapshots, onView, onDelete }: SnapshotGallery
     <Card className="h-full">
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
-          <CardTitle className="text-lg">Thư viện Snapshot</CardTitle>
-          <Badge variant="outline" className="text-xs">
-            {snapshots.length} ảnh
-          </Badge>
+          <div className="flex items-center gap-2">
+            <CardTitle className="text-lg">Thư viện Snapshot</CardTitle>
+            <Badge variant="outline" className="text-xs">
+              {snapshots.length} ảnh
+            </Badge>
+          </div>
+          <Button 
+            variant="ghost" 
+            size="sm" 
+            className="text-xs text-red-500 hover:text-red-700 hover:bg-red-50"
+            onClick={() => {
+              if (confirm("Bạn có chắc chắn muốn xóa toàn bộ snapshot?")) {
+                fetch(apiUrl("/api/system/clear-data"), { method: "POST" })
+                  .then(() => window.location.reload());
+              }
+            }}
+          >
+            Xóa tất cả
+          </Button>
         </div>
       </CardHeader>
       <CardContent className="p-4 pt-0">
@@ -119,6 +135,12 @@ export function SnapshotGallery({ snapshots, onView, onDelete }: SnapshotGallery
                   </div>
                   
                   {/* Info overlay */}
+                  <div className="absolute top-2 left-2">
+                    <Badge className="bg-black/50 text-[10px] h-4 px-1 border-none">
+                      #{snapshot.id}
+                    </Badge>
+                  </div>
+                  
                   <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2">
                     <p className="text-xs text-white truncate">
                       {formatDateTime(snapshot.timestamp)}
