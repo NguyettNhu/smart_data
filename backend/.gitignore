@@ -1,0 +1,17 @@
+# Secrets — never commit
+.env
+.env.local
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime artifacts
+stats.db
+snapshots/
+
+# Pretrained weights auto-download; the trained model is committed.
+*.pt
+*.onnx
+!models/fall_yolo.pt

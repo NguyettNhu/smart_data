@@ -1,26 +1,23 @@
 "use client";
-
-import { cn } from "@/lib/utils";
 import * as React from "react";
+import * as ScrollAreaPrimitive from "@radix-ui/react-scroll-area";
+import { cn } from "@/lib/utils";
 
-interface ScrollAreaProps extends React.HTMLAttributes<HTMLDivElement> {
-  children: React.ReactNode;
-}
-
-const ScrollArea = React.forwardRef<HTMLDivElement, ScrollAreaProps>(
-  ({ className, children, ...props }, ref) => {
-    return (
-      <div
-        ref={ref}
-        className={cn("relative overflow-auto", className)}
-        {...props}
-      >
-        {children}
-      </div>
-    );
-  }
-);
+export const ScrollArea = React.forwardRef<
+  React.ElementRef<typeof ScrollAreaPrimitive.Root>,
+  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.Root>
+>(({ className, children, ...props }, ref) => (
+  <ScrollAreaPrimitive.Root ref={ref} className={cn("relative overflow-hidden", className)} {...props}>
+    <ScrollAreaPrimitive.Viewport className="h-full w-full rounded-[inherit]">
+      {children}
+    </ScrollAreaPrimitive.Viewport>
+    <ScrollAreaPrimitive.Scrollbar
+      orientation="vertical"
+      className="flex touch-none select-none transition-colors p-0.5 w-2.5"
+    >
+      <ScrollAreaPrimitive.Thumb className="relative flex-1 rounded-full bg-line-3" />
+    </ScrollAreaPrimitive.Scrollbar>
+    <ScrollAreaPrimitive.Corner />
+  </ScrollAreaPrimitive.Root>
+));
 ScrollArea.displayName = "ScrollArea";
-
-export { ScrollArea };
-

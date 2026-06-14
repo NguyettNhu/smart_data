@@ -1,5 +1,8 @@
 node_modules
 
+# Next.js build output
+.next/
+
 # Python virtual environment (backend)
 backend/.venv/
 
@@ -11,8 +14,11 @@ backend/.venv/
 **/.env*.local
 **/.env
 
-# Model weights / TorchScript (auto-downloaded on first run, too large for git)
+# Model weights: pretrained ones auto-download on first run, but the TRAINED
+# fall-detection model IS committed so the repo is self-contained.
 *.pt
+*.onnx
+!backend/models/fall_yolo.pt
 backend/*.ts
 
 # Runtime data

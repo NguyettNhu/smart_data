@@ -1,33 +1,36 @@
-"use client";
-
-import { cn } from "@/lib/utils";
 import * as React from "react";
+import { cva, type VariantProps } from "class-variance-authority";
+import { cn } from "@/lib/utils";
 
-export interface BadgeProps extends React.HTMLAttributes<HTMLDivElement> {
-  variant?: "default" | "secondary" | "destructive" | "outline" | "success" | "warning";
+const badgeVariants = cva(
+  "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold transition-colors",
+  {
+    variants: {
+      variant: {
+        default: "border-line-2 bg-surface-2 text-ink-2",
+        accent: "border-accent-line bg-accent-soft text-accent-ink",
+        success: "border-success-line bg-success-soft text-success",
+        warning: "border-warning-line bg-warning-soft text-warning",
+        danger: "border-danger-line bg-danger-soft text-danger",
+        critical: "border-critical-line bg-critical-soft text-critical",
+        outline: "border-line-2 bg-transparent text-ink-2",
+        solid: "border-transparent bg-ink text-white",
+      },
+      size: {
+        default: "",
+        sm: "px-1.5 py-0 text-[10px]",
+      },
+    },
+    defaultVariants: { variant: "default", size: "default" },
+  }
+);
+
+export interface BadgeProps
+  extends React.HTMLAttributes<HTMLDivElement>,
+    VariantProps<typeof badgeVariants> {}
+
+export function Badge({ className, variant, size, ...props }: BadgeProps) {
+  return <div className={cn(badgeVariants({ variant, size }), className)} {...props} />;
 }
 
-function Badge({ className, variant = "default", ...props }: BadgeProps) {
-  const variants = {
-    default: "bg-orange-500 text-white",
-    secondary: "bg-gray-200 text-gray-800",
-    destructive: "bg-red-500 text-white",
-    outline: "border border-gray-300 text-gray-800",
-    success: "bg-green-500 text-white",
-    warning: "bg-yellow-500 text-white",
-  };
-
-  return (
-    <div
-      className={cn(
-        "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold transition-colors",
-        variants[variant],
-        className
-      )}
-      {...props}
-    />
-  );
-}
-
-export { Badge };
-
+export { badgeVariants };

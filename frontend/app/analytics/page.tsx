@@ -1,234 +1,523 @@
 "use client";
-
-import React from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { LineChart } from "@/components/analytics/line-chart";
-import { HeatmapChart } from "@/components/analytics/heatmap-chart";
-import { ModelMetrics } from "@/components/analytics/model-metrics";
+import * as React from "react";
+import Link from "next/link";
+import { motion } from "motion/react";
+import {
+  BarChart3,
+  Siren,
+  Target,
+  Timer,
+  TrendingDown,
+  TrendingUp,
+  Sparkles,
+  MapPin,
+  Clock,
+  Activity,
+  CheckCircle2,
+  AlertCircle,
+  Radio,
+  ShieldCheck,
+  ArrowRight,
+} from "lucide-react";
+import { api, EMPTY_STATS } from "@/lib/api";
+import type { Stats } from "@/lib/types";
+import { pct, formatDuration, cn, SEVERITY_VI } from "@/lib/utils";
+import { staggerContainer } from "@/lib/motion";
+import { useUI } from "@/components/shell/ui-context";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { apiUrl } from "@/lib/api";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { StatCard } from "@/components/dashboard/stat-card";
+import {
+  TrendArea,
+  CategoryBar,
+  SeverityDonut,
+  CHART,
+  SEVERITY_COLOR,
+} from "@/components/charts/charts";
+import { LiveDot } from "@/components/common/live-dot";
+import { InsightList, useInsights } from "@/components/copilot/insight-cards";
+
+// ---------------------------------------------------------------------------
+// Zone risk helpers
+// ---------------------------------------------------------------------------
+function riskColor(risk: number): string {
+  if (risk < 30) return "#10b981"; // green
+  if (risk < 55) return "#f59e0b"; // amber
+  if (risk < 75) return "#e0552a"; // orange
+  return "#dc2626"; // red
+}
+
+function riskLabel(risk: number): string {
+  if (risk < 30) return "Thấp";
+  if (risk < 55) return "Trung bình";
+  if (risk < 75) return "Cao";
+  return "Nghiêm trọng";
+}
+
+function riskBadgeVariant(risk: number): "success" | "warning" | "danger" | "critical" {
+  if (risk < 30) return "success";
+  if (risk < 55) return "warning";
+  if (risk < 75) return "danger";
+  return "critical";
+}
+
+// ---------------------------------------------------------------------------
+// Status breakdown tile config
+// ---------------------------------------------------------------------------
+const STATUS_CONFIG: Record<
+  string,
+  { label: string; icon: React.ElementType; color: string; bg: string }
+> = {
+  active: {
+    label: "Mới",
+    icon: Siren,
+    color: "text-danger",
+    bg: "bg-danger-soft",
+  },
+  acknowledged: {
+    label: "Đã tiếp nhận",
+    icon: AlertCircle,
+    color: "text-warning",
+    bg: "bg-warning-soft",
+  },
+  responding: {
+    label: "Đang ứng phó",
+    icon: Radio,
+    color: "text-accent",
+    bg: "bg-accent-soft",
+  },
+  resolved: {
+    label: "Đã xử lý",
+    icon: ShieldCheck,
+    color: "text-success",
+    bg: "bg-success-soft",
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Page component
+// ---------------------------------------------------------------------------
+type TimeRange = "7d" | "14d" | "30d";
+
+const RANGE_LABEL: Record<TimeRange, string> = {
+  "7d": "7 ngày",
+  "14d": "14 ngày",
+  "30d": "30 ngày",
+};
 
 export default function AnalyticsPage() {
-  // Hourly fall data will come from API
-  const defaultHourlyData = [
-    { hour: "00:00", falls: 0 },
-    { hour: "02:00", falls: 0 },
-    { hour: "04:00", falls: 0 },
-    { hour: "06:00", falls: 0 },
-    { hour: "08:00", falls: 0 },
-    { hour: "10:00", falls: 0 },
-    { hour: "12:00", falls: 0 },
-    { hour: "14:00", falls: 0 },
-    { hour: "16:00", falls: 0 },
-    { hour: "18:00", falls: 0 },
-    { hour: "20:00", falls: 0 },
-    { hour: "22:00", falls: 0 },
-  ];
+  const [stats, setStats] = React.useState<Stats>(EMPTY_STATS);
+  const [range, setRange] = React.useState<TimeRange>("14d");
+  const insights = useInsights(30000);
+  const { askCopilot } = useUI();
 
-
-  // Sample data for heatmap - Fall locations in room
-  const heatmapData = [
-    { x: 0, y: 0, value: 2 },
-    { x: 1, y: 0, value: 1 },
-    { x: 2, y: 1, value: 3 },
-    { x: 3, y: 1, value: 5 },
-    { x: 2, y: 2, value: 4 },
-    { x: 3, y: 2, value: 2 },
-    { x: 4, y: 2, value: 1 },
-    { x: 1, y: 3, value: 2 },
-    { x: 2, y: 3, value: 6 },
-    { x: 3, y: 3, value: 3 },
-  ];
-
-  // State for stats
-  const [statsData, setStatsData] = React.useState({
-    total_falls: 0,
-    weekly_falls: 0,
-    weekly_change: 0,
-    accuracy: 0.0,
-    response_time: 0,
-    hourly_data: [] as { hour: string; falls: number }[],
-  });
-
-  // Fetch stats from backend
-  React.useEffect(() => {
-    const fetchStats = async () => {
-      try {
-        const res = await fetch(apiUrl("/api/stats"));
-        if (res.ok) {
-          const data = await res.json();
-          setStatsData(data);
-        }
-      } catch (error) {
-        console.error("Failed to fetch stats:", error);
-      }
-    };
-
-    fetchStats();
-    // Refresh every 10 seconds
-    const interval = setInterval(fetchStats, 10000);
-    return () => clearInterval(interval);
+  // Poll stats every 10 s
+  const load = React.useCallback(async () => {
+    const s = await api.stats();
+    setStats(s);
   }, []);
 
-  // Summary stats with real data
-  const stats = [
-    { label: "Tổng số lần ngã", value: statsData.total_falls.toString(), change: `+${statsData.total_falls}`, isUp: true },
-    { label: "Ngã tuần này", value: statsData.weekly_falls.toString(), change: `${statsData.weekly_change >= 0 ? '+' : ''}${statsData.weekly_change}%`, isUp: statsData.weekly_change >= 0 },
-    { label: "Thời gian phản hồi TB", value: `${statsData.response_time.toFixed(1)}s`, change: "-15%", isUp: false },
-    { label: "Độ chính xác phát hiện", value: `${(statsData.accuracy * 100).toFixed(1)}%`, change: "+2.1%", isUp: true },
-  ];
+  React.useEffect(() => {
+    load();
+    const t = setInterval(load, 10_000);
+    return () => clearInterval(t);
+  }, [load]);
 
+  // Slice daily_data to the selected range for the trend chart label
+  const trendLabel = `Số ca ngã · ${RANGE_LABEL[range]} qua`;
+
+  // Rank zones by count descending
+  const rankedZones = React.useMemo(
+    () => [...stats.zone_breakdown].sort((a, b) => b.count - a.count),
+    [stats.zone_breakdown]
+  );
+
+  const maxZoneCount = rankedZones[0]?.count ?? 1;
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">Phân tích & Thống kê</h1>
-        <p className="text-gray-500">Báo cáo chi tiết về hoạt động phát hiện ngã</p>
+      {/* ------------------------------------------------------------------ */}
+      {/* Header                                                              */}
+      {/* ------------------------------------------------------------------ */}
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <Badge variant="accent" className="gap-1.5">
+              <LiveDot color="accent" className="size-1.5" />
+              Trực tiếp
+            </Badge>
+            <span className="text-[12px] text-ink-3">
+              Cập nhật mỗi 10 giây · {pct(stats.uptime, 2)} uptime
+            </span>
+          </div>
+          <h1 className="text-[26px] font-bold tracking-tight text-ink">Phân tích</h1>
+          <p className="text-[13px] text-ink-3">
+            Hiệu năng phát hiện, xu hướng và rủi ro trên toàn bộ khu vực.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Time range tabs */}
+          <Tabs value={range} onValueChange={(v) => setRange(v as TimeRange)}>
+            <TabsList>
+              <TabsTrigger value="7d">7 ngày</TabsTrigger>
+              <TabsTrigger value="14d">14 ngày</TabsTrigger>
+              <TabsTrigger value="30d">30 ngày</TabsTrigger>
+            </TabsList>
+          </Tabs>
+
+          <Button
+            size="sm"
+            onClick={() => askCopilot("Summarize fall analytics and key risks")}
+          >
+            <Sparkles className="size-4" />
+            Hỏi Trợ lý AI
+          </Button>
+        </div>
       </div>
 
-      {/* Summary Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        {stats.map((stat, index) => (
-          <Card key={index}>
-            <CardContent className="p-4">
-              <p className="text-sm text-gray-500">{stat.label}</p>
-              <div className="flex items-end justify-between mt-1">
-                <p className="text-3xl font-bold text-gray-900">{stat.value}</p>
-                <Badge
-                  variant={stat.isUp ? (stat.label.includes("Độ chính xác") ? "success" : "destructive") : "success"}
-                  className="text-xs"
-                >
-                  {stat.change}
-                </Badge>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-
-      {/* Charts Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Line Chart - Falls by Hour */}
-        <LineChart
-          title="Tần suất ngã theo khung giờ"
-          description="Phân tích số lần ngã theo từng khung giờ trong ngày (7 ngày gần nhất)"
-          data={statsData.hourly_data.length > 0 ? statsData.hourly_data : defaultHourlyData}
+      {/* ------------------------------------------------------------------ */}
+      {/* KPI row                                                             */}
+      {/* ------------------------------------------------------------------ */}
+      <motion.div
+        variants={staggerContainer}
+        initial="hidden"
+        animate="show"
+        className="grid grid-cols-2 gap-4 lg:grid-cols-4"
+      >
+        <StatCard
+          label="Tổng số ca ngã"
+          value={stats.total_falls}
+          icon={BarChart3}
+          accent="accent"
+          hint="Tất cả các lần phát hiện đã ghi nhận"
         />
-
-        {/* Heatmap - Fall Locations */}
-        <HeatmapChart
-          title="Vị trí hay bị ngã trong phòng"
-          description="Bản đồ nhiệt dựa trên tọa độ bounding box từ YOLO"
-          data={heatmapData}
-          rows={4}
-          cols={6}
+        <StatCard
+          label="Số ca ngã tuần này"
+          value={stats.weekly_falls}
+          icon={TrendingDown}
+          accent="danger"
+          trend={{ value: stats.weekly_change, goodWhenDown: true }}
+          hint={
+            stats.weekly_change > 0
+              ? `+${stats.weekly_change}% so với tuần trước`
+              : `${stats.weekly_change}% so với tuần trước`
+          }
         />
-      </div>
+        <StatCard
+          label="Thời gian phản hồi TB"
+          value={stats.avg_response_time}
+          suffix="s"
+          icon={Timer}
+          accent="violet"
+          hint="Số giây đến khi tiếp nhận"
+        />
+        <StatCard
+          label="Độ chính xác phát hiện"
+          value={stats.accuracy * 100}
+          decimals={1}
+          suffix="%"
+          icon={Target}
+          accent="success"
+          hint="Điểm độ tin cậy trung bình"
+        />
+      </motion.div>
 
-      {/* Model Metrics */}
-      <ModelMetrics
-        title="Hiệu suất Model YOLO"
-        description="Biểu đồ Loss và mAP qua quá trình huấn luyện (100 epochs)"
-      />
+      {/* ------------------------------------------------------------------ */}
+      {/* Bento grid                                                          */}
+      {/* ------------------------------------------------------------------ */}
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
 
-      {/* Additional Insights */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Peak Hours */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Giờ cao điểm</CardTitle>
+        {/* ── Fall activity trend ──────────────────────────────────────── */}
+        <Card className="xl:col-span-8">
+          <CardHeader className="flex-row items-center justify-between">
+            <div>
+              <CardTitle>Diễn biến số ca ngã theo thời gian</CardTitle>
+              <CardDescription>{trendLabel}</CardDescription>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-2xl font-bold tabular-nums text-ink">
+                {stats.weekly_falls}
+              </span>
+              <Badge variant={stats.weekly_change > 0 ? "danger" : "success"}>
+                {stats.weekly_change > 0 ? (
+                  <TrendingUp className="size-3" />
+                ) : (
+                  <TrendingDown className="size-3" />
+                )}
+                {stats.weekly_change > 0 ? "+" : ""}
+                {stats.weekly_change}% wk
+              </Badge>
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="space-y-3">
-              {[
-                { time: "20:00 - 22:00", count: 12, percent: 25.5 },
-                { time: "06:00 - 08:00", count: 8, percent: 17.0 },
-                { time: "18:00 - 20:00", count: 7, percent: 14.9 },
-              ].map((item, i) => (
-                <div key={i} className="flex items-center justify-between">
-                  <span className="text-sm font-medium">{item.time}</span>
-                  <div className="flex items-center gap-2">
-                    <div className="w-24 h-2 bg-gray-200 rounded-full overflow-hidden">
+            <TrendArea
+              data={stats.daily_data}
+              xKey="label"
+              yKey="falls"
+              height={280}
+              label="Số ca ngã"
+            />
+          </CardContent>
+        </Card>
+
+        {/* ── Severity distribution ────────────────────────────────────── */}
+        <Card className="xl:col-span-4">
+          <CardHeader>
+            <CardTitle>Phân bố mức độ</CardTitle>
+            <CardDescription>Tất cả sự cố đã ghi nhận</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <SeverityDonut data={stats.severity_breakdown} height={200} />
+            <div className="mt-4 space-y-2">
+              {stats.severity_breakdown.map((s) => (
+                <div key={s.severity} className="flex items-center gap-2.5 text-[12.5px]">
+                  <span
+                    className="size-2.5 shrink-0 rounded-full"
+                    style={{ background: SEVERITY_COLOR[s.severity] ?? CHART.teal }}
+                  />
+                  <span className="text-ink-2">{SEVERITY_VI[s.severity] ?? s.severity}</span>
+                  <div className="ml-auto flex items-center gap-2">
+                    <div className="h-1.5 w-16 overflow-hidden rounded-full bg-surface-2">
                       <div
-                        className="h-full bg-orange-500 rounded-full"
-                        style={{ width: `${item.percent}%` }}
+                        className="h-full rounded-full transition-all duration-700"
+                        style={{
+                          width: `${
+                            stats.severity_breakdown.reduce((a, b) => a + b.count, 0) > 0
+                              ? (s.count /
+                                  stats.severity_breakdown.reduce((a, b) => a + b.count, 0)) *
+                                100
+                              : 0
+                          }%`,
+                          background: SEVERITY_COLOR[s.severity] ?? CHART.teal,
+                        }}
                       />
                     </div>
-                    <span className="text-sm text-gray-500 w-8">{item.count}</span>
+                    <span className="w-6 text-right font-semibold tabular-nums text-ink">
+                      {s.count}
+                    </span>
                   </div>
                 </div>
               ))}
             </div>
-            <p className="text-xs text-gray-500 mt-4">
-              💡 Gợi ý: Tăng cường giám sát vào buổi tối (20:00-22:00)
-            </p>
           </CardContent>
         </Card>
 
-        {/* Risk Areas */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Vùng nguy hiểm cao</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              {[
-                { area: "Cạnh giường", count: 15, risk: "high" },
-                { area: "Phòng tắm", count: 12, risk: "high" },
-                { area: "Cầu thang", count: 8, risk: "medium" },
-              ].map((item, i) => (
-                <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-gray-50">
-                  <span className="text-sm font-medium">{item.area}</span>
-                  <div className="flex items-center gap-2">
-                    <Badge
-                      variant={item.risk === "high" ? "destructive" : "warning"}
-                      className="text-xs"
-                    >
-                      {item.risk === "high" ? "Cao" : "TB"}
-                    </Badge>
-                    <span className="text-sm text-gray-500">{item.count} lần</span>
-                  </div>
-                </div>
-              ))}
+        {/* ── Distribution by hour ─────────────────────────────────────── */}
+        <Card className="xl:col-span-6">
+          <CardHeader className="flex-row items-center gap-2">
+            <Clock className="size-4 text-ink-3" />
+            <div>
+              <CardTitle>Phân bố theo giờ</CardTitle>
+              <CardDescription>Số ca ngã theo giờ trong ngày · 7 ngày gần đây</CardDescription>
             </div>
-            <p className="text-xs text-gray-500 mt-4">
-              ⚠️ Khuyến nghị: Lắp thêm tay vịn tại khu vực cạnh giường
-            </p>
+          </CardHeader>
+          <CardContent>
+            <CategoryBar
+              data={stats.hourly_data}
+              xKey="hour"
+              yKey="falls"
+              color={CHART.teal}
+              height={240}
+              label="Số ca ngã"
+            />
           </CardContent>
         </Card>
 
-        {/* Weekly Trend */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Xu hướng tuần</CardTitle>
+        {/* ── Incidents by zone ────────────────────────────────────────── */}
+        <Card className="xl:col-span-6">
+          <CardHeader className="flex-row items-center gap-2">
+            <MapPin className="size-4 text-ink-3" />
+            <div>
+              <CardTitle>Sự cố theo khu vực</CardTitle>
+              <CardDescription>Nhấn vào khu vực để hỏi AI đánh giá rủi ro</CardDescription>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <CategoryBar
+              data={stats.zone_breakdown}
+              xKey="zone"
+              yKey="count"
+              color={CHART.violet}
+              height={200}
+              label="Sự cố"
+            />
+
+            {/* Ranked zone list */}
+            {rankedZones.length > 0 && (
+              <div className="space-y-1.5">
+                {rankedZones.map((z, idx) => (
+                  <button
+                    key={z.zone}
+                    onClick={() => askCopilot(`Đánh giá rủi ro cho ${z.zone}`)}
+                    className={cn(
+                      "group w-full rounded-lg border border-line px-3 py-2 text-left",
+                      "transition-all hover:border-accent-line hover:bg-accent-soft/40"
+                    )}
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <span className="w-4 shrink-0 text-[11px] font-bold tabular-nums text-ink-4">
+                        {idx + 1}
+                      </span>
+                      <span className="flex-1 truncate text-[13px] font-medium text-ink">
+                        {z.zone}
+                      </span>
+                      <Badge variant={riskBadgeVariant(z.risk)} size="sm">
+                        {riskLabel(z.risk)}
+                      </Badge>
+                      <span className="text-[12px] font-semibold tabular-nums text-ink-2">
+                        {z.count}
+                      </span>
+                      <ArrowRight className="size-3.5 shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100" />
+                    </div>
+                    {/* Mini progress bar */}
+                    <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-surface-2 pl-6">
+                      <div
+                        className="h-full rounded-full transition-all duration-700"
+                        style={{
+                          width: `${maxZoneCount > 0 ? (z.count / maxZoneCount) * 100 : 0}%`,
+                          background: riskColor(z.risk),
+                        }}
+                      />
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* ── Incident status & response ───────────────────────────────── */}
+        <Card className="xl:col-span-8">
+          <CardHeader className="flex-row items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Activity className="size-4 text-ink-3" />
+              <div>
+                <CardTitle>Trạng thái &amp; ứng phó sự cố</CardTitle>
+                <CardDescription>
+                  Thời gian phản hồi TB:{" "}
+                  <span className="font-semibold text-ink">
+                    {formatDuration(stats.avg_response_time)}
+                  </span>{" "}
+                  · tỷ lệ đã xử lý{" "}
+                  <span className="font-semibold text-ink">
+                    {pct(stats.resolved_rate, 0)}
+                  </span>
+                </CardDescription>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 text-[12px] text-ink-4">
+              <CheckCircle2 className="size-3.5 text-success" />
+              <span>{pct(stats.resolved_rate, 0)} đã xử lý</span>
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="flex items-end justify-between h-32 gap-2">
-              {[
-                { day: "T2", value: 2 },
-                { day: "T3", value: 1 },
-                { day: "T4", value: 3 },
-                { day: "T5", value: 0 },
-                { day: "T6", value: 2 },
-                { day: "T7", value: 4 },
-                { day: "CN", value: 3 },
-              ].map((item, i) => (
-                <div key={i} className="flex flex-col items-center flex-1">
+            {/* Status tiles */}
+            <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {(["active", "acknowledged", "responding", "resolved"] as const).map((status) => {
+                const cfg = STATUS_CONFIG[status];
+                const Icon = cfg.icon;
+                const entry = stats.status_breakdown.find((s) => s.status === status);
+                const count = entry?.count ?? 0;
+                const total = stats.status_breakdown.reduce((a, b) => a + b.count, 0);
+                const share = total > 0 ? (count / total) * 100 : 0;
+
+                return (
                   <div
-                    className="w-full bg-orange-500 rounded-t-md transition-all hover:bg-orange-600"
-                    style={{ height: `${(item.value / 4) * 100}%`, minHeight: item.value > 0 ? "8px" : "2px" }}
-                  />
-                  <span className="text-xs text-gray-500 mt-2">{item.day}</span>
-                </div>
-              ))}
+                    key={status}
+                    className="rounded-xl border border-line bg-surface p-3.5 shadow-xs"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div
+                        className={cn(
+                          "grid size-8 place-items-center rounded-lg",
+                          cfg.bg
+                        )}
+                      >
+                        <Icon className={cn("size-4", cfg.color)} />
+                      </div>
+                      <span className="text-[11px] font-medium text-ink-4">
+                        {share.toFixed(0)}%
+                      </span>
+                    </div>
+                    <div className="mt-2.5 text-[26px] font-bold leading-none tabular-nums text-ink">
+                      {count}
+                    </div>
+                    <div className="mt-1 text-[11.5px] font-medium text-ink-3">{cfg.label}</div>
+                    {/* Mini share bar */}
+                    <div className="mt-2 h-1 overflow-hidden rounded-full bg-surface-2">
+                      <div
+                        className="h-full rounded-full transition-all duration-700"
+                        style={{
+                          width: `${share}%`,
+                          background:
+                            status === "active"
+                              ? CHART.red
+                              : status === "acknowledged"
+                              ? CHART.amber
+                              : status === "responding"
+                              ? CHART.teal
+                              : CHART.emerald,
+                        }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-            <p className="text-xs text-gray-500 mt-4">
-              📊 Cuối tuần có tần suất ngã cao hơn ngày thường
-            </p>
+
+            {/* Response insight line */}
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-line bg-surface-2/60 px-4 py-3 text-[13px] text-ink-2">
+              <span className="flex items-center gap-1.5">
+                <Timer className="size-3.5 text-ink-4" />
+                Thời gian tiếp nhận TB:{" "}
+                <strong className="text-ink">
+                  {formatDuration(stats.avg_response_time)}
+                </strong>
+              </span>
+              <span className="flex items-center gap-1.5">
+                <CheckCircle2 className="size-3.5 text-success" />
+                Đã xử lý trong kỳ:{" "}
+                <strong className="text-ink">
+                  {stats.status_breakdown.find((s) => s.status === "resolved")?.count ?? 0}
+                </strong>
+              </span>
+              <span className="flex items-center gap-1.5">
+                <Activity className="size-3.5 text-ink-4" />
+                Tỷ lệ xử lý:{" "}
+                <strong className="text-ink">{pct(stats.resolved_rate, 1)}</strong>
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* ── AI Insights ──────────────────────────────────────────────── */}
+        <Card className="xl:col-span-4">
+          <CardHeader className="flex-row items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="grid size-7 place-items-center rounded-lg bg-gradient-to-br from-accent to-[#13b8a4] text-white">
+                <Sparkles className="size-4" />
+              </div>
+              <CardTitle>Nhận định từ AI</CardTitle>
+            </div>
+            <Button asChild variant="ghost" size="sm">
+              <Link href="/copilot" className="gap-1 text-[12px]">
+                Mở Trợ lý AI <ArrowRight className="size-3" />
+              </Link>
+            </Button>
+          </CardHeader>
+          <CardContent className="max-h-[400px] overflow-y-auto no-scrollbar">
+            <InsightList insights={insights} max={4} />
           </CardContent>
         </Card>
       </div>
+
+      {/* Footer */}
+      <p className="pt-2 text-center text-[11px] text-ink-4">
+        Aegis · YOLO-Pose detection · {pct(stats.uptime, 2)} uptime · chế độ phân tích
+      </p>
     </div>
   );
 }
