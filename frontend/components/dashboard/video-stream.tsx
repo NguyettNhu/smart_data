@@ -4,7 +4,6 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { useToast } from "@/components/ui/toast";
 
 interface Detection {
   id: string;
@@ -20,7 +19,6 @@ interface Detection {
 interface VideoStreamProps {
   showSkeleton: boolean;
   onFallDetected: (detection: Detection) => void;
-  onSnapshotCapture?: (imageData: string, detection: Detection) => void;
 }
 
 function generateSkeletonPoints(isFall: boolean, baseX: number, baseY: number): { x: number; y: number }[] {
@@ -77,7 +75,7 @@ function generateInterpolatedSkeleton(t: number, baseX: number, baseY: number): 
   }));
 }
 
-export function VideoStream({ showSkeleton, onFallDetected, onSnapshotCapture }: VideoStreamProps) {
+export function VideoStream({ showSkeleton, onFallDetected }: VideoStreamProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isConnected, setIsConnected] = useState(true);
   const [manualFallMode, setManualFallMode] = useState(false);
@@ -85,7 +83,6 @@ export function VideoStream({ showSkeleton, onFallDetected, onSnapshotCapture }:
   const animationRef = useRef<number | null>(null);
   const lastFallTimeRef = useRef<number>(0);
   const manualFallTriggeredRef = useRef<boolean>(false);
-  const { addToast } = useToast();
 
   // Trigger manual fall
   const triggerManualFall = useCallback(() => {
@@ -134,25 +131,12 @@ export function VideoStream({ showSkeleton, onFallDetected, onSnapshotCapture }:
         skeleton: showSkeleton ? generateInterpolatedSkeleton(fallTransition, baseX, 150) : undefined,
       };
       
-      // Trigger fall detection when fully fallen and not yet triggered
+      // Simulation only: update stats/history, no snapshot, no notification
       if (isFullyFallen && manualFallTriggeredRef.current) {
         manualFallTriggeredRef.current = false;
         onFallDetected(manualDetection);
-        
-        // Capture snapshot
-        if (canvasRef.current && onSnapshotCapture) {
-          const imageData = canvasRef.current.toDataURL("image/png");
-          onSnapshotCapture(imageData, manualDetection);
-        }
-        
-        addToast({
-          title: "⚠️ PHÁT HIỆN NGÃ!",
-          description: `Camera 01 - Điều khiển thủ công - Độ tin cậy: ${(manualDetection.confidence * 100).toFixed(0)}%`,
-          variant: "destructive",
-          duration: 8000,
-        });
       }
-      
+
       newDetections.push(manualDetection);
     }
     
@@ -179,19 +163,13 @@ export function VideoStream({ showSkeleton, onFallDetected, onSnapshotCapture }:
       
       if (isFall) {
         onFallDetected(detection);
-        addToast({
-          title: "⚠️ PHÁT HIỆN NGÃ!",
-          description: `Camera 01 - Độ tin cậy: ${(detection.confidence * 100).toFixed(0)}%`,
-          variant: "destructive",
-          duration: 8000,
-        });
       }
-      
+
       newDetections.push(detection);
     }
     
     return newDetections;
-  }, [showSkeleton, onFallDetected, addToast, manualFallMode, fallTransition, onSnapshotCapture]);
+  }, [showSkeleton, onFallDetected, manualFallMode, fallTransition]);
 
   useEffect(() => {
     const canvas = canvasRef.current;

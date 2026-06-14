@@ -54,6 +54,7 @@ export default function DetectionPage() {
   const pendingStreamRef = useRef<MediaStream | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const isWaitingForResponse = useRef(false);
+  const fallActiveRef = useRef(false); // tracks if a fall is currently active (for edge-triggered alert)
 
   // Check webcam permission on mount
   useEffect(() => {
@@ -107,6 +108,7 @@ export default function DetectionPage() {
       ws.onopen = () => {
         console.log("WebSocket connected");
         isWaitingForResponse.current = false;
+        fallActiveRef.current = false;
 
         // Send initial configuration
         const savedThreshold = localStorage.getItem("detection-threshold");
@@ -136,17 +138,9 @@ export default function DetectionPage() {
                 const h = y2 - y1;
 
                 const label = d.class_name;
-                // distinct color for fall
+                // distinct color for a fallen person
                 const isFall = label.toLowerCase().includes("fall") || label.toLowerCase().includes("down");
                 const color = isFall ? "#ef4444" : (CLASS_COLORS[label] || CLASS_COLORS.default);
-
-                if (isFall) {
-                  setFallDetected(true);
-                  // Play audio alert
-                  if (isAudioEnabled && audioRef.current) {
-                    audioRef.current.play().catch(e => console.log("Audio play failed", e));
-                  }
-                }
 
                 return {
                   id: index,
@@ -162,11 +156,17 @@ export default function DetectionPage() {
 
               setDetections(newDetections);
 
-              // Update overall fall status
-              const hasFall = newDetections.some(d => d.label.toLowerCase().includes("fall") || d.label.toLowerCase().includes("down"));
-              if (!hasFall) {
-                setFallDetected(false);
+              // Use the backend's confirmed (temporally-smoothed) fall flag
+              const hasFall = !!data.fall_detected;
+              setFallDetected(hasFall);
+
+              // Sound the alert ONCE, on the rising edge of a fall (the moment it
+              // is first confirmed) -- not repeatedly while the person stays down.
+              if (hasFall && !fallActiveRef.current && isAudioEnabled && audioRef.current) {
+                audioRef.current.currentTime = 0;
+                audioRef.current.play().catch(e => console.log("Audio play failed", e));
               }
+              fallActiveRef.current = hasFall;
             }
           }
         } catch (e) {

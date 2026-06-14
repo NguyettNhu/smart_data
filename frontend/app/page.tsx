@@ -109,19 +109,6 @@ export default function DashboardPage() {
     }
   }, []);
 
-  // Handle snapshot capture from video stream
-  const handleSnapshotCapture = useCallback((imageData: string, detection: { confidence: number }) => {
-    // Only add to local state if we want real-time feedback before the next poll
-    const newSnapshot: Snapshot = {
-      id: `snap-${Date.now()}`,
-      timestamp: new Date(),
-      camera: "Camera 01",
-      confidence: detection.confidence,
-      imageData: imageData, // Store the actual image data
-    };
-    setSnapshots((prev) => [newSnapshot, ...prev.slice(0, 11)]);
-  }, []);
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -147,7 +134,6 @@ export default function DashboardPage() {
           <VideoStream
             showSkeleton={showSkeleton}
             onFallDetected={handleFallDetected}
-            onSnapshotCapture={handleSnapshotCapture}
           />
         </div>
 
