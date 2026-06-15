@@ -1768,7 +1768,7 @@ def _gemini_agent_answer(question: str, stats: Dict, events: List[Dict], api_key
         f"CÂU HỎI: {question}"
     )
     client = genai.Client(api_key=api_key)
-    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     resp = client.models.generate_content(model=model, contents=prompt)
     text = (getattr(resp, "text", None) or "").strip()
     if not text:

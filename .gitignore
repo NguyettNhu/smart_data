@@ -24,3 +24,4 @@ backend/*.ts
 # Runtime data
 backend/stats.db
 backend/snapshots/
+colab_fall_detection_gpu.ipynb
