@@ -6,3 +6,6 @@
 #     pip install mediapipe
 mediapipe>=0.10.14
 tensorflow>=2.15
+
+# Google Gemini Copilot (set GEMINI_API_KEY). Optional.
+google-genai>=1.0.0

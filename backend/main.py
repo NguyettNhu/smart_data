@@ -1737,6 +1737,57 @@ def _grounded_agent_answer(question: str, stats: Dict, events: List[Dict]) -> Di
     }
 
 
+def _gemini_agent_answer(question: str, stats: Dict, events: List[Dict], api_key: str) -> Dict:
+    """Answer with Google Gemini, grounded on the live fall-detection data."""
+    from google import genai
+
+    ctx = {
+        "today_falls": stats.get("today_falls"),
+        "weekly_falls": stats.get("weekly_falls"),
+        "weekly_change_pct": stats.get("weekly_change"),
+        "total_falls": stats.get("total_falls"),
+        "active_incidents": stats.get("active_incidents"),
+        "avg_response_time_s": stats.get("avg_response_time"),
+        "accuracy": stats.get("accuracy"),
+        "resolved_rate": stats.get("resolved_rate"),
+        "hourly_data": stats.get("hourly_data"),
+        "daily_data": stats.get("daily_data"),
+        "zone_breakdown": stats.get("zone_breakdown"),
+        "severity_breakdown": stats.get("severity_breakdown"),
+        "status_breakdown": stats.get("status_breakdown"),
+        "recent_events": [
+            {k: e.get(k) for k in ("zone", "camera", "severity", "status", "confidence", "timestamp")}
+            for e in events[:15]
+        ],
+    }
+    prompt = (
+        "Bạn là 'Trợ lý Aegis', chuyên gia phân tích hệ thống phát hiện té ngã. "
+        "Trả lời NGẮN GỌN, rõ ràng bằng tiếng Việt (markdown khi cần). "
+        "CHỈ dựa vào DỮ LIỆU JSON bên dưới; nếu thiếu dữ liệu hãy nói rõ, không bịa số.\n\n"
+        f"DỮ LIỆU HỆ THỐNG (JSON):\n{json.dumps(ctx, ensure_ascii=False, default=str)}\n\n"
+        f"CÂU HỎI: {question}"
+    )
+    client = genai.Client(api_key=api_key)
+    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    resp = client.models.generate_content(model=model, contents=prompt)
+    text = (getattr(resp, "text", None) or "").strip()
+    if not text:
+        raise RuntimeError("empty Gemini response")
+    return {
+        "answer": text,
+        "mode": "llm",
+        "tools_used": [{"name": "gemini", "summary": f"Hỏi {model} kèm dữ liệu hệ thống"}],
+        "chart": None,
+        "table": None,
+        "citations": [f"Gemini ({model}) · dựa trên {stats.get('total_falls', 0)} sự kiện đã ghi nhận"],
+        "suggestions": [
+            "Giờ cao điểm ngã là khi nào?",
+            "Khu vực nào rủi ro nhất?",
+            "Tóm tắt tình hình 7 ngày qua",
+        ],
+    }
+
+
 @app.post("/api/agent/query")
 async def agent_query(body: Dict[str, Any] = Body(...)):
     question = body.get("question", "").strip()
@@ -1751,17 +1802,20 @@ async def agent_query(body: Dict[str, Any] = Body(...)):
             "suggestions": ["Show me a summary", "What is the peak hour?", "Which zone is riskiest?"],
         }
 
-    # Optionally try LLM if key available (lazy import, no hard dependency)
-    llm_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY")
-    if llm_key:
-        # LLM branch can be added here in future; fall through to grounded for now
-        pass
-
     try:
         conn = sqlite3.connect(DB_NAME)
         stats_resp = await get_statistics()
         events = _get_events_14d(conn)
         conn.close()
+
+        # Use Gemini if a key is configured; fall back to the grounded engine.
+        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if gemini_key:
+            try:
+                return _gemini_agent_answer(question, stats_resp, events, gemini_key)
+            except Exception as ge:
+                print(f"Gemini error, falling back to grounded: {ge}")
+
         return _grounded_agent_answer(question, stats_resp, events)
     except Exception as e:
         print(f"Agent query error: {e}")
@@ -1857,7 +1911,8 @@ async def get_system_info():
     except Exception:
         pass
 
-    llm_enabled = bool(os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY"))
+    llm_enabled = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+                       or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY"))
 
     is_pose = "pose" in MODEL_PATH.lower()
     return {
