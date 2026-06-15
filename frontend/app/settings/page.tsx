@@ -158,16 +158,17 @@ function SettingRow({
 // ─── Tab 1 — Detection ────────────────────────────────────────────────────────
 
 function DetectionTab() {
-  const [threshold, setThreshold] = React.useState<number>(() => {
-    if (typeof window === "undefined") return 70;
-    const stored = localStorage.getItem("detection-threshold");
-    return stored ? parseInt(stored, 10) : 70;
-  });
+  // Initialize with server-safe defaults so the first client render matches the
+  // SSR output, then hydrate the persisted values from localStorage after mount.
+  const [threshold, setThreshold] = React.useState<number>(70);
+  const [privacyMode, setPrivacyMode] = React.useState<string>("full");
 
-  const [privacyMode, setPrivacyMode] = React.useState<string>(() => {
-    if (typeof window === "undefined") return "full";
-    return localStorage.getItem("privacy-mode") ?? "full";
-  });
+  React.useEffect(() => {
+    const stored = localStorage.getItem("detection-threshold");
+    if (stored) setThreshold(parseInt(stored, 10));
+    const mode = localStorage.getItem("privacy-mode");
+    if (mode) setPrivacyMode(mode);
+  }, []);
 
   const [lieTimer, setLieTimer] = React.useState<number>(30);
   const [multiPerson, setMultiPerson] = React.useState<boolean>(true);

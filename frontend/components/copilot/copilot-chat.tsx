@@ -1,7 +1,7 @@
 "use client";
 import * as React from "react";
 import { motion } from "motion/react";
-import { Sparkles, ArrowUp, Wrench, Quote, User } from "lucide-react";
+import { Sparkles, ArrowUp, Wrench, User } from "lucide-react";
 import { api } from "@/lib/api";
 import type { AgentAnswer } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -186,12 +186,6 @@ function MessageRow({ msg, onSuggestion, compact }: { msg: Msg; onSuggestion: (s
                 <AnswerTable rows={msg.answer.table} />
               )}
 
-              {msg.answer.citations.length > 0 && (
-                <div className="mt-2.5 flex items-start gap-1.5 border-t border-line pt-2 text-[11px] text-ink-4">
-                  <Quote className="mt-0.5 size-3 shrink-0" />
-                  <span>{msg.answer.citations.join(" · ")}</span>
-                </div>
-              )}
             </div>
 
             {msg.answer.suggestions.length > 0 && (

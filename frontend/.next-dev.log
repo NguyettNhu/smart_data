@@ -9,6 +9,15 @@
    - Environments: .env.local
 
  ✓ Starting...
- ✓ Ready in 2.9s
- ○ Compiling / ...
- GET / 200 in 350ms (compile: 18ms, render: 333ms)
+ ✓ Ready in 2.6s
+ ○ Compiling /live ...
+ GET / 200 in 4.5s (compile: 4.3s, render: 240ms)
+ GET /live 200 in 10.9s (compile: 9.4s, render: 1450ms)
+   Reload env: .env.local
+ ✓ Compiled in 192ms
+ GET /live 200 in 510ms (compile: 268ms, render: 243ms)
+ GET /analytics 200 in 1545ms (compile: 1498ms, render: 47ms)
+ GET /copilot 200 in 1944ms (compile: 1861ms, render: 83ms)
+ GET /copilot 200 in 52ms (compile: 15ms, render: 37ms)
+[baseline-browser-mapping] The data in this module is over two months old.  To ensure accurate Baseline data, please update: `npm i baseline-browser-mapping@latest -D`
+[?25h
