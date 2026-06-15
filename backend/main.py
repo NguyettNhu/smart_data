@@ -456,11 +456,17 @@ class FallScorer:
     FALL_THR = 0.55     # smoothed probability needed to confirm a fall
     LATCH_S = 8.0       # keep the alert active this long after confirmation
     BUF = 60            # frames of feature history to keep
+    # arXiv 2503.19501: a 20-frame buffer + majority voting on the per-frame
+    # posture. Confirms a sustained "on the ground" posture robustly (high
+    # recall, few false positives) in addition to the dynamic velocity path.
+    VOTE_WINDOW = 20
+    VOTE_CONFIRM = 12   # >= 60% of the window must read "fallen posture"
 
     def __init__(self):
         self.buf = []
         self.smoother = BayesianSmoother()
         self.fallen_until = 0.0
+        self.posture_votes = []
 
     # ---- rule ensemble on the 2D feature buffer (adapted from reference) ----
     def _rule_score(self):
@@ -534,6 +540,15 @@ class FallScorer:
         pos = min(1.0, (sum(scores) / len(scores)) * 1.2)
         return float(np.clip(pos * (1.0 - gate), 0, 1))
 
+    def _posture_vote(self, f):
+        """Per-frame vote: is this person CURRENTLY in a fallen posture?
+        Gated by head-above-feet so a bend / squat / stand never votes."""
+        if f.get("head_above_feet"):
+            return 0
+        horizontal = (f["spine_horiz"] > 0.55) or (f["bbox_ar"] > 1.15)
+        head_low = f.get("head_hip_dy", 1.0) < 0.20   # head dropped to hip level
+        return 1 if (horizontal or head_low) else 0
+
     def _stillness_ok(self):
         """Post-fall confirmation: the person stays roughly still."""
         if len(self.buf) < 6:
@@ -562,9 +577,23 @@ class FallScorer:
             raw = float(geom.get("fall_confidence", 0.0)) if geom.get("is_fall") else 0.0
 
         prob = self.smoother.update(raw)
-        if prob >= self.FALL_THR and (feats is None or self._stillness_ok()):
+
+        # arXiv-style 20-frame majority voting on posture (robust for someone
+        # who is lying still on the ground, where velocity rules see nothing).
+        if feats is not None:
+            self.posture_votes.append(self._posture_vote(feats))
+            if len(self.posture_votes) > self.VOTE_WINDOW:
+                self.posture_votes.pop(0)
+        vote_sum = sum(self.posture_votes)
+        vote_ratio = vote_sum / len(self.posture_votes) if self.posture_votes else 0.0
+        posture_confirms = (len(self.posture_votes) >= self.VOTE_CONFIRM
+                            and vote_sum >= self.VOTE_CONFIRM)
+
+        # Confirm on EITHER a dynamic fall (velocity rules + stillness) OR a
+        # sustained fallen posture (majority vote).
+        if (prob >= self.FALL_THR and (feats is None or self._stillness_ok())) or posture_confirms:
             self.fallen_until = now + self.LATCH_S
-        return (now < self.fallen_until), prob
+        return (now < self.fallen_until), max(prob, vote_ratio)
 
 # ==================== MODEL LAYER ====================
 
