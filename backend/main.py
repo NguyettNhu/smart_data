@@ -340,58 +340,194 @@ def _fallback_bbox_logic(box, confidence):
                 "fall_confidence": min(0.9, confidence * 0.9), "reasons": ["wide_bbox_fallback"]}
     return {"is_fall": False, "status": "standing", "fall_confidence": 0, "reasons": []}
 
-# ==================== TEMPORAL FALL TRACKING ====================
+# ==================== TEMPORAL FALL SCORER ====================
+# Upgraded temporal logic adapted from doan-hoang-215/Fall-Detecton
+# (MediaPipe + rule-based ensemble + Bayesian smoothing). That project relies
+# on a trained TCN and MediaPipe 3D landmarks; here we port the *runtime* ideas
+# to YOLO COCO-17 keypoints (2D): fall DYNAMICS (velocity / acceleration / jerk
+# of hip & head + floor impact), NEGATIVE GATES that suppress non-falls
+# (sitting, standing up, fast sit-down), POSITIVE RULES for real falls,
+# asymmetric BAYESIAN smoothing, and post-fall STILLNESS confirmation.
 
-class FallTracker:
-    """Adds temporal robustness on top of the per-frame pose geometry.
 
-    A fall is an ACTION, not just a posture. Two temporal signals catch the
-    cases the single-frame geometry misses (e.g. a person curled up on the
-    ground in distant CCTV, whose compact box reads as "standing"):
+class BayesianSmoother:
+    """Asymmetric EMA: reacts fast when the fall probability rises, decays
+    slowly when it drops (so a brief detector miss does not clear the alert)."""
 
-      * Height collapse: when a person's bounding-box height suddenly drops
-        well below their recent standing height, they have gone to the floor.
-      * Latch: once a fall is detected we keep it active for a few seconds so
-        the person lying still (or briefly lost by the detector) stays
-        flagged instead of flickering back to "Normal".
+    def __init__(self, alpha_rise=0.60, alpha_fall=0.35):
+        self.alpha_rise = alpha_rise
+        self.alpha_fall = alpha_fall
+        self.smooth = 0.0
+
+    def update(self, raw_prob: float) -> float:
+        alpha = self.alpha_rise if raw_prob > self.smooth else self.alpha_fall
+        self.smooth = alpha * raw_prob + (1.0 - alpha) * self.smooth
+        return self.smooth
+
+
+def pose_features_2d(keypoints, box, img_w, img_h):
+    """COCO-17 keypoints (pixels) -> normalised 2D pose features (0..1 space).
+    Returns None when the torso (shoulders + hips) is not visible -- the same
+    "upper-body-only -> don't guess" guard used by detect_fall_from_pose."""
+    if keypoints is None or len(keypoints) < 17 or img_w <= 0 or img_h <= 0:
+        return None
+
+    def P(i):
+        if i < len(keypoints) and keypoints[i][2] > 0.3:
+            return np.array([keypoints[i][0] / img_w, keypoints[i][1] / img_h], dtype=float)
+        return None
+
+    nose = P(0)
+    sh = [p for p in (P(5), P(6)) if p is not None]
+    hip = [p for p in (P(11), P(12)) if p is not None]
+    kn = [p for p in (P(13), P(14)) if p is not None]
+    an = [p for p in (P(15), P(16)) if p is not None]
+    if not sh or not hip:
+        return None  # need torso to judge posture
+
+    mid_sh = np.mean(sh, axis=0)
+    mid_hip = np.mean(hip, axis=0)
+    spine = mid_hip - mid_sh
+    # 0 = vertical torso (standing), 1 = horizontal torso (lying)
+    spine_horiz = float(np.clip(abs(spine[0]) / (abs(spine[1]) + 1e-6) / 3.0, 0, 1))
+
+    x1, y1, x2, y2 = box
+    bw = (x2 - x1) / img_w + 1e-6
+    bh = (y2 - y1) / img_h + 1e-6
+    bbox_ar = float(np.clip(bw / bh, 0, 5))
+
+    sh_tilt = float(abs(sh[0][1] - sh[1][1])) if len(sh) == 2 else 0.0
+    hip_tilt = float(abs(hip[0][1] - hip[1][1])) if len(hip) == 2 else 0.0
+    head_hip_dy = float(abs(nose[1] - mid_hip[1]) / bh) if nose is not None else 1.0
+
+    def _knee(h, k, a):
+        v1 = h - k; v2 = a - k
+        n1 = np.linalg.norm(v1); n2 = np.linalg.norm(v2)
+        if n1 < 1e-6 or n2 < 1e-6:
+            return 0.5
+        return float(np.clip(np.arccos(np.clip(np.dot(v1, v2) / (n1 * n2), -1, 1)) / np.pi, 0, 1))
+
+    knee_avg = 0.7
+    if hip and kn and an:
+        knee_avg = _knee(mid_hip, np.mean(kn, axis=0), np.mean(an, axis=0))
+
+    return {
+        "hip_y": float(mid_hip[1]), "nose_y": float(nose[1]) if nose is not None else float(mid_sh[1]),
+        "spine_horiz": spine_horiz, "bbox_ar": bbox_ar,
+        "sh_tilt": sh_tilt, "hip_tilt": hip_tilt,
+        "head_hip_dy": head_hip_dy, "knee_avg": knee_avg,
+    }
+
+
+class FallScorer:
+    """Per-connection temporal fall scorer for the dominant person.
+
+    Pose model  -> rich rule ensemble (gates + rules) on a feature buffer.
+    Detect model -> smooth the model's own per-frame fall confidence.
+    Either way the raw probability is Bayesian-smoothed and latched, and a
+    confirmed fall additionally requires post-fall stillness when possible.
     """
 
-    WINDOW_S = 2.0          # short window -> only a SUDDEN height drop counts
-                            # (a person walking away shrinks gradually, no trigger)
-    LATCH_S = 8.0           # how long a detected fall stays active
-    COLLAPSE_RATIO = 0.55   # "much shorter than standing" threshold
-    MIN_BASELINE = 60       # ignore tiny boxes (px) to avoid noise
-    CONFIRM_FRAMES = 2      # consecutive fall-ish frames needed to confirm
+    FALL_THR = 0.55     # smoothed probability needed to confirm a fall
+    LATCH_S = 8.0       # keep the alert active this long after confirmation
+    BUF = 60            # frames of feature history to keep
 
     def __init__(self):
-        self.history = []       # (time, height)
-        self.fall_frames = 0
+        self.buf = []
+        self.smoother = BayesianSmoother()
         self.fallen_until = 0.0
 
-    def update(self, box, geom_is_fall, now):
-        """box: dominant person xyxy (or None). geom_is_fall: bool from pose
-        geometry. now: seconds. Returns (confirmed_fallen, collapse, baseline)."""
-        collapse = False
-        baseline = 0.0
-        if box is not None:
-            h = box[3] - box[1]
-            self.history.append((now, h))
-            self.history = [(t, hh) for (t, hh) in self.history if now - t <= self.WINDOW_S]
-            baseline = max(hh for (t, hh) in self.history)
-            if baseline >= self.MIN_BASELINE and h < self.COLLAPSE_RATIO * baseline:
-                collapse = True
+    # ---- rule ensemble on the 2D feature buffer (adapted from reference) ----
+    def _rule_score(self):
+        buf = self.buf
+        if len(buf) < 8:
+            return 0.0
+        cur = buf[-1]
+        v_hip = [f["v_hip"] for f in buf[-15:]]
 
-        if geom_is_fall or collapse:
-            self.fall_frames += 1
+        # --- NEGATIVE GATES (suppress non-falls) ---
+        gate = 0.0
+        if len(buf) >= 20:                                   # G1 controlled/slow sit-down
+            v20 = [f["v_hip"] for f in buf[-20:]]
+            j20 = [abs(f["j_hip"]) for f in buf[-20:]]
+            if (np.std(v20) < 0.012 and max(v20) < 0.04 and max(j20) < 0.03
+                    and np.mean(v20[-8:]) > 0.002 and cur["sh_tilt"] < 0.05):
+                gate = max(gate, 0.70)
+        if len(buf) >= 30:                                   # G2 prolonged descent
+            v30 = [f["v_hip"] for f in buf[-30:]]
+            if sum(1 for v in v30 if v > 0.004) >= 22:
+                gate = max(gate, 0.75)
+        if len(v_hip) >= 8:                                  # G3 recovery (standing back up)
+            pk = int(np.argmax(v_hip))
+            if pk <= len(v_hip) - 4 and np.mean(v_hip[pk:]) < -0.004:
+                gate = max(gate, 0.85)
+        if len(buf) >= 15:                                   # G7 fast sit-down (knees bend, torso upright)
+            v15 = [f["v_hip"] for f in buf[-15:]]
+            kn15 = [f["knee_avg"] for f in buf[-15:]]
+            spine_end = np.mean([f["spine_horiz"] for f in buf[-4:]])
+            if max(v15) > 0.04 and (np.mean(kn15[:4]) - np.mean(kn15[-4:])) > 0.10 and spine_end > 0.55:
+                gate = max(gate, 0.78)
+        if gate >= 0.85:
+            return 0.0
+
+        # --- POSITIVE RULES (detect real falls) ---
+        scores = []
+        if cur["bbox_ar"] > 1.2 and cur["spine_horiz"] < 0.35:                       # R1 horizontal body
+            scores.append(min(1.0, (cur["bbox_ar"] - 1.2) * 2 + (0.35 - cur["spine_horiz"]) * 2))
+        sum_v = sum(v for v in v_hip if v > 0); max_v = max(v_hip)
+        if sum_v > 0.08 and max_v > 0.03:                                            # R2 rapid drop + velocity spike
+            scores.append(min(1.0, sum_v * 6))
+        if cur["spine_horiz"] < 0.30 and cur["knee_avg"] > 0.80 and cur["sh_tilt"] > 0.02:  # R3 lying + straight knees
+            scores.append(min(1.0, 0.65 + (0.30 - cur["spine_horiz"]) * 1.5))
+        if cur["head_hip_dy"] < 0.15:                                                # R4 head at hip level
+            scores.append(min(1.0, (0.15 - cur["head_hip_dy"]) * 10))
+        if cur["v_nose"] > 0.02 and cur["a_nose"] > 0:                               # R5 head free-fall
+            scores.append(min(1.0, cur["v_nose"] * 15))
+        tilt_avg = (cur["sh_tilt"] + cur["hip_tilt"]) / 2
+        if tilt_avg > 0.04 and abs(cur["j_hip"]) > 0.03:                             # R9 asymmetric impact
+            scores.append(min(1.0, tilt_avg * 6 + abs(cur["j_hip"]) * 8))
+        if len(buf) >= 10:                                                           # impact: jerk peak after velocity peak
+            v10 = [f["v_hip"] for f in buf[-10:]]; j10 = [abs(f["j_hip"]) for f in buf[-10:]]
+            pk = int(np.argmax(v10))
+            if pk < len(j10) - 1 and max(j10[pk:]) > 0.04:
+                scores.append(min(1.0, max(j10[pk:]) * 12))
+
+        if not scores:
+            return 0.0
+        pos = min(1.0, (sum(scores) / len(scores)) * 1.2)
+        return float(np.clip(pos * (1.0 - gate), 0, 1))
+
+    def _stillness_ok(self):
+        """Post-fall confirmation: the person stays roughly still."""
+        if len(self.buf) < 6:
+            return True  # not enough history -> don't block
+        recent = self.buf[-10:]
+        return float(np.mean([abs(f["v_hip"]) + abs(f["v_nose"]) for f in recent])) < 0.05
+
+    def update(self, keypoints, box, img_w, img_h, geom, now):
+        """Returns (confirmed_fallen, smoothed_prob)."""
+        feats = pose_features_2d(keypoints, box, img_w, img_h) if MODEL_IS_POSE else None
+
+        if feats is not None:
+            prev = self.buf[-1] if self.buf else None
+            feats["v_hip"] = (feats["hip_y"] - prev["hip_y"]) if prev else 0.0
+            feats["v_nose"] = (feats["nose_y"] - prev["nose_y"]) if prev else 0.0
+            feats["a_hip"] = (feats["v_hip"] - prev["v_hip"]) if prev else 0.0
+            feats["a_nose"] = (feats["v_nose"] - prev.get("v_nose", 0.0)) if prev else 0.0
+            feats["j_hip"] = (feats["a_hip"] - prev.get("a_hip", 0.0)) if prev else 0.0
+            self.buf.append(feats)
+            if len(self.buf) > self.BUF:
+                self.buf.pop(0)
+            raw = self._rule_score()
         else:
-            self.fall_frames = 0
+            # Detection model (no keypoints) OR upper-body-only: trust the
+            # per-frame signal (model class label / geometry) and smooth it.
+            raw = float(geom.get("fall_confidence", 0.0)) if geom.get("is_fall") else 0.0
 
-        # The static-geometry fix already prevents standing false positives,
-        # so a short streak is enough to confirm a real fall.
-        if self.fall_frames >= self.CONFIRM_FRAMES:
+        prob = self.smoother.update(raw)
+        if prob >= self.FALL_THR and (feats is None or self._stillness_ok()):
             self.fallen_until = now + self.LATCH_S
-
-        return (now < self.fallen_until), collapse, baseline
+        return (now < self.fallen_until), prob
 
 # ==================== MODEL LAYER ====================
 
@@ -405,6 +541,21 @@ MODEL_IS_POSE = MODEL_TASK == "pose" or "pose" in MODEL_PATH.lower()
 MODEL_NAMES = getattr(model, "names", {}) or {}
 print(f"Model loaded. task={MODEL_TASK} | pose_mode={MODEL_IS_POSE} | classes={list(MODEL_NAMES.values())[:6]}")
 
+# Optional trained engine: MediaPipe Pose + TCN (adapted from Fall-Detecton).
+# Enable with FALL_ENGINE=mediapipe and the model files in backend/model_v8/.
+FALL_ENGINE = os.getenv("FALL_ENGINE", "yolo").lower()
+MP_ENGINE = None
+if FALL_ENGINE == "mediapipe":
+    try:
+        from fall_mediapipe import MediaPipeFallEngine, models_available
+        if models_available():
+            MP_ENGINE = MediaPipeFallEngine
+            print("Fall engine: MediaPipe + trained model (backend/model_v8)")
+        else:
+            print("FALL_ENGINE=mediapipe but model_v8 files are missing -> falling back to YOLO")
+    except Exception as e:
+        print(f"MediaPipe engine unavailable ({e}) -> falling back to YOLO")
+
 
 def run_inference(image: Image.Image, conf_threshold: float = 0.25):
     results = model(image, conf=conf_threshold, verbose=False)
@@ -416,7 +567,7 @@ def analyze_detection(result, i, xyxy, confidence) -> Dict[str, Any]:
 
     * Pose model   -> torso / keypoint geometry (detect_fall_from_pose).
     * Detect model -> use the predicted class label (a 'Fall*' class => fallen).
-    The temporal FallTracker is applied on top of either signal downstream.
+    The temporal FallScorer is applied on top of either signal downstream.
     """
     if MODEL_IS_POSE:
         kpts = None
@@ -529,10 +680,12 @@ async def websocket_predict(websocket: WebSocket):
     conf_threshold = 0.25
     global last_alert_time
 
-    # Temporal fall tracking: detects the fall as an action (sudden height
-    # collapse) and latches it so a person lying still on the ground stays
-    # flagged instead of flickering back to "normal".
-    tracker = FallTracker()
+    # Temporal fall scorer: per-frame dynamics (velocity/accel/jerk + impact),
+    # negative gates (sit / stand-up / fast sit-down), positive fall rules,
+    # asymmetric Bayesian smoothing and post-fall stillness. Adapted from
+    # doan-hoang-215/Fall-Detecton to YOLO COCO-17 keypoints.
+    scorer = FallScorer()
+    mp_engine = MP_ENGINE() if MP_ENGINE is not None else None
 
     try:
         while True:
@@ -552,6 +705,35 @@ async def websocket_predict(websocket: WebSocket):
             if "bytes" in data:
                 try:
                     image_data = data["bytes"]
+
+                    # ── Trained MediaPipe + TCN engine ──────────────────────
+                    if mp_engine is not None:
+                        import cv2
+                        frame = cv2.imdecode(np.frombuffer(image_data, np.uint8), cv2.IMREAD_COLOR)
+                        h, w = frame.shape[:2]
+                        r = mp_engine.process(frame, time.time())
+                        dets = []
+                        if r["box"] is not None:
+                            bx1, by1, bx2, by2 = r["box"]
+                            dets.append({
+                                "box": [bx1 * w, by1 * h, bx2 * w, by2 * h],
+                                "confidence": r["prob"],
+                                "class_id": 0,
+                                "class_name": r["status"],
+                                "is_fall": r["fall"],
+                                "fall_confidence": r["prob"] if r["fall"] else 0.0,
+                            })
+                        if r["fall"]:
+                            current_time = time.time()
+                            if current_time - last_alert_time > COOLDOWN_SECONDS:
+                                print("🚨 FALL DETECTED! (MediaPipe+TCN)")
+                                snap = Image.fromarray(frame[:, :, ::-1])
+                                save_detection("fall", r["prob"] or 0.9, snap)
+                                send_alert_async(r["prob"] or 0.9)
+                                last_alert_time = current_time
+                        await websocket.send_json({"detections": dets, "fall_detected": bool(r["fall"])})
+                        continue
+
                     image = Image.open(io.BytesIO(image_data))
                     result = run_inference(image, conf_threshold)
 
@@ -572,10 +754,15 @@ async def websocket_predict(websocket: WebSocket):
                             dom_area = area
                             dom_idx = len(raw) - 1
 
-                    # Temporal decision (height-collapse + latch) on the main person
+                    # Temporal decision on the dominant person (FallScorer)
                     dom_box = raw[dom_idx][0] if dom_idx >= 0 else None
-                    dom_is_fall = raw[dom_idx][2]["is_fall"] if dom_idx >= 0 else False
-                    fall_confirmed, _, _ = tracker.update(dom_box, dom_is_fall, time.time())
+                    dom_geom = raw[dom_idx][2] if dom_idx >= 0 else {}
+                    dom_kpts = None
+                    if (dom_idx >= 0 and result.keypoints is not None
+                            and dom_idx < len(result.keypoints)):
+                        dom_kpts = result.keypoints[dom_idx].data[0].cpu().numpy()
+                    fall_confirmed, _ = scorer.update(
+                        dom_kpts, dom_box, image.width, image.height, dom_geom, time.time())
 
                     # Build payload: while a fall is confirmed the dominant person
                     # is flagged "fallen" even if this frame's pose reads "standing"

@@ -1,0 +1,8 @@
+# Optional deps for the trained MediaPipe + TCN fall engine.
+# Activate the engine with:  FALL_ENGINE=mediapipe  (and place the 3 model
+# files in backend/model_v8/). The default YOLO path needs none of these.
+#
+# On Google Colab, TensorFlow is already installed -> there you only need:
+#     pip install mediapipe
+mediapipe>=0.10.14
+tensorflow>=2.15
