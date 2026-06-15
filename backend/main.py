@@ -712,11 +712,19 @@ async def websocket_predict(websocket: WebSocket):
     conf_threshold = 0.25
     global last_alert_time
 
-    # Temporal fall scorer: per-frame dynamics (velocity/accel/jerk + impact),
-    # negative gates (sit / stand-up / fast sit-down), positive fall rules,
-    # asymmetric Bayesian smoothing and post-fall stillness. Adapted from
-    # doan-hoang-215/Fall-Detecton to YOLO COCO-17 keypoints.
-    scorer = FallScorer()
+    # Per-PERSON temporal fall scoring. Each tracked person (stable ByteTrack id)
+    # gets its OWN FallScorer, so a multi-person scene or a fast mover is judged
+    # independently instead of collapsing everything onto the single largest
+    # person (which previously flagged a standing foreground person as "fallen").
+    scorers: Dict[int, FallScorer] = {}
+    last_seen: Dict[int, int] = {}
+    frame_idx = 0
+    # Ring buffer of recent frames + their per-frame fall "evidence". On a
+    # confirmed fall we snapshot the frame with the STRONGEST evidence in the
+    # window (most horizontal / lowest body = the moment of impact) instead of
+    # the lagged current frame, where the person may have already stood back up.
+    recent_frames: List[Any] = []   # list of (rgb_ndarray, evidence_float)
+    RECENT_MAX = 45
     mp_engine = MP_ENGINE() if MP_ENGINE is not None else None
 
     try:
@@ -766,78 +774,91 @@ async def websocket_predict(websocket: WebSocket):
                         await websocket.send_json({"detections": dets, "fall_detected": bool(r["fall"])})
                         continue
 
-                    image = Image.open(io.BytesIO(image_data))
-                    result = run_inference(image, conf_threshold)
+                    image = Image.open(io.BytesIO(image_data)).convert("RGB")
+                    frame_idx += 1
 
-                    # First pass: pose geometry for every person; find the
-                    # dominant (largest) person to drive the temporal tracker.
-                    raw = []
-                    dom_idx = -1
-                    dom_area = 0.0
-                    for i, box in enumerate(result.boxes):
-                        xyxy = box.xyxy[0].tolist()
-                        confidence = float(box.conf[0])
+                    # Track people across frames so each person keeps a stable id
+                    # and its own temporal scorer. Fall back to plain detection if
+                    # the tracker is unavailable for any reason.
+                    try:
+                        result = model.track(
+                            image, persist=True, conf=conf_threshold,
+                            tracker="bytetrack.yaml", verbose=False)[0]
+                    except Exception:
+                        result = run_inference(image, conf_threshold)
 
-                        fall_result = analyze_detection(result, i, xyxy, confidence)
-                        raw.append((xyxy, confidence, fall_result))
+                    boxes = result.boxes
+                    ids = (boxes.id.int().cpu().tolist()
+                           if boxes is not None and getattr(boxes, "id", None) is not None else [])
 
-                        area = (xyxy[2] - xyxy[0]) * (xyxy[3] - xyxy[1])
-                        if area > dom_area:
-                            dom_area = area
-                            dom_idx = len(raw) - 1
-
-                    # Temporal decision on the dominant person (FallScorer)
-                    dom_box = raw[dom_idx][0] if dom_idx >= 0 else None
-                    dom_geom = raw[dom_idx][2] if dom_idx >= 0 else {}
-                    dom_kpts = None
-                    if (dom_idx >= 0 and result.keypoints is not None
-                            and dom_idx < len(result.keypoints)):
-                        dom_kpts = result.keypoints[dom_idx].data[0].cpu().numpy()
-                    fall_confirmed, _ = scorer.update(
-                        dom_kpts, dom_box, image.width, image.height, dom_geom, time.time())
-
-                    # Build payload: while a fall is confirmed the dominant person
-                    # is flagged "fallen" even if this frame's pose reads "standing"
-                    # (they may be lying curled up on the ground).
                     detections = []
                     best_fall_conf = 0.0
-                    for j, (xyxy, confidence, fall_result) in enumerate(raw):
-                        # Show the model's ACTUAL per-frame classification so a real
-                        # detection is visible immediately (don't relabel to 'standing').
+                    frame_evidence = 0.0       # strongest per-frame fall geometry this frame
+                    any_confirmed = False
+
+                    for i, box in enumerate(boxes or []):
+                        xyxy = box.xyxy[0].tolist()
+                        confidence = float(box.conf[0])
+                        fall_result = analyze_detection(result, i, xyxy, confidence)
                         status = fall_result["status"]
                         is_fall = fall_result["is_fall"]
                         fc = fall_result["fall_confidence"]
-                        # Temporal confirmation pins the dominant person as 'fallen'
-                        # even if a single frame flickers (e.g. curled up on the floor).
-                        if fall_confirmed and j == dom_idx:
-                            status = "fallen"
-                            is_fall = True
-                            fc = max(fc, 0.85)
+                        frame_evidence = max(frame_evidence, fall_result["fall_confidence"])
+
+                        tid = ids[i] if i < len(ids) else None
+                        if tid is not None:
+                            kpts = None
+                            if result.keypoints is not None and i < len(result.keypoints):
+                                kpts = result.keypoints[i].data[0].cpu().numpy()
+                            sc = scorers.get(tid)
+                            if sc is None:
+                                sc = FallScorer()
+                                scorers[tid] = sc
+                            confirmed, _ = sc.update(
+                                kpts, xyxy, image.width, image.height, fall_result, time.time())
+                            last_seen[tid] = frame_idx
+                            if confirmed:                # this person's own temporal decision
+                                status = "fallen"
+                                is_fall = True
+                                fc = max(fc, 0.85)
+                                any_confirmed = True
+
                         detections.append({
                             "box": xyxy,
                             "confidence": confidence,
                             "class_id": 0,
                             "class_name": status,
                             "is_fall": is_fall,
-                            "fall_confidence": fc
+                            "fall_confidence": fc,
                         })
                         if is_fall and fc > best_fall_conf:
                             best_fall_conf = fc
 
-                    fall_detected = fall_confirmed
+                    # Keep a short rolling window of frames + evidence.
+                    recent_frames.append((np.asarray(image), frame_evidence))
+                    if len(recent_frames) > RECENT_MAX:
+                        recent_frames.pop(0)
+                    # Forget people not seen recently so the scorer map stays small.
+                    for t in [t for t, f in last_seen.items() if frame_idx - f > 90]:
+                        scorers.pop(t, None)
+                        last_seen.pop(t, None)
 
-                    # Trigger alert only on a confirmed fall (respecting cooldown)
+                    fall_detected = any_confirmed
                     if fall_detected:
                         current_time = time.time()
                         if current_time - last_alert_time > COOLDOWN_SECONDS:
                             print("🚨 FALL DETECTED! (confirmed)")
-                            save_detection("fall", best_fall_conf or 0.9, image)
+                            # Snapshot the highest-evidence frame in the window — the
+                            # actual moment of the fall — not the lagged current one.
+                            best_arr, _ = (max(recent_frames, key=lambda x: x[1])
+                                           if recent_frames else (np.asarray(image), 0.0))
+                            save_detection("fall", best_fall_conf or 0.9, Image.fromarray(best_arr))
                             send_alert_async(best_fall_conf or 0.9)
                             last_alert_time = current_time
 
                     await websocket.send_json({
                         "detections": detections,
-                        "fall_detected": fall_detected
+                        "fall_detected": fall_detected,
                     })
 
                 except Exception as e:
