@@ -309,6 +309,21 @@ def detect_fall_from_pose(keypoints, box, confidence) -> Dict[str, Any]:
             fall_score += 0.3
             reasons.append("medium_spread_ratio")
 
+    # Bounding-box corroboration. An UPRIGHT person (standing / walking /
+    # bending forward / squatting) has a box taller than wide; a person lying
+    # on the ground has a square-to-wide box. Require this so a forward-bend, a
+    # squat, or two overlapping people whose keypoints merge into a fake
+    # "horizontal torso" cannot be scored as a fall.
+    x1b, y1b, x2b, y2b = box
+    bw, bh = (x2b - x1b), (y2b - y1b)
+    ar = (bw / bh) if bh > 0 else 0.0
+    if ar > 1.2:
+        fall_score += 0.30                       # wide box strongly corroborates a fall
+        reasons.append(f"wide_box({ar:.2f})")
+    elif ar < 0.9:
+        fall_score = min(fall_score, 0.30)       # clearly upright -> cannot be "fallen"
+        reasons.append(f"upright_box({ar:.2f})")
+
     # Decision
     if fall_score >= 0.6:
         return {
@@ -451,6 +466,16 @@ class FallScorer:
             return 0.0
         cur = buf[-1]
         v_hip = [f["v_hip"] for f in buf[-15:]]
+
+        # UPRIGHT GATE: a box clearly taller than wide is a standing / walking /
+        # bending / squatting person. Unless there is a real downward velocity
+        # spike (an actual drop in progress), such a posture cannot be a fall --
+        # this kills the "walking person flagged fallen" / "crouch flagged
+        # fallen" false alarms while still letting genuine falls through once the
+        # body drops or ends up horizontal on the ground.
+        max_v_recent = max([f["v_hip"] for f in buf[-10:]]) if len(buf) >= 10 else 0.0
+        if cur["bbox_ar"] < 0.80 and max_v_recent < 0.03:
+            return 0.0
 
         # --- NEGATIVE GATES (suppress non-falls) ---
         gate = 0.0
