@@ -33,6 +33,13 @@ import numpy as np
 
 load_dotenv()
 
+# Fixed timezone so detection times / peak-hour stats are correct regardless of
+# where the backend runs (Colab servers run in UTC -> a 19:00 fall would
+# otherwise be recorded as 12:00). Override with the TZ env var if needed.
+os.environ.setdefault("TZ", os.getenv("APP_TZ", "Asia/Ho_Chi_Minh"))
+if hasattr(time, "tzset"):
+    time.tzset()  # Unix only (Colab); on Windows datetime.now() already uses local time
+
 DB_NAME = "stats.db"
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
