@@ -178,8 +178,11 @@ def save_detection(
         )
         conn.commit()
         conn.close()
+        # Absolute path of the saved snapshot, so the alert can attach it.
+        return os.path.join(SNAPSHOTS_DIR, os.path.basename(image_path)) if image_path else None
     except Exception as e:
         print(f"Error saving detection: {e}")
+        return None
 
 # ==================== NOTIFICATION LAYER ====================
 
@@ -189,8 +192,9 @@ def email_configured() -> bool:
     return bool(EMAIL_SENDER and EMAIL_PASSWORD and EMAIL_RECEIVER)
 
 
-def _send_email(subject: str, body: str):
-    """Send a plain-text email via Gmail SMTP. Returns (ok, message)."""
+def _send_email(subject: str, body: str, attachment_path: Optional[str] = None):
+    """Send an email via Gmail SMTP, optionally attaching the snapshot image.
+    Returns (ok, message)."""
     if not email_configured():
         return False, "Email chưa được cấu hình (thiếu biến trong .env)."
     try:
@@ -199,6 +203,13 @@ def _send_email(subject: str, body: str):
         msg["Subject"] = subject
         msg["From"] = EMAIL_SENDER
         msg["To"] = EMAIL_RECEIVER
+        if attachment_path and os.path.exists(attachment_path):
+            try:
+                with open(attachment_path, "rb") as f:
+                    msg.add_attachment(f.read(), maintype="image", subtype="jpeg",
+                                       filename=os.path.basename(attachment_path))
+            except Exception as ae:
+                print(f"Could not attach snapshot: {ae}")
         context = ssl.create_default_context()
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
             server.login(EMAIL_SENDER, EMAIL_PASSWORD)
@@ -210,19 +221,69 @@ def _send_email(subject: str, body: str):
         return False, str(e)
 
 
-def send_email_alert(confidence: float, zone: str = "Main Floor", camera: str = "CAM-01"):
-    body = (
+def _compose_fall_email_ai(confidence: float, zone: str, camera: str, when_str: str):
+    """Let Gemini write the alert email (subject + body) in Vietnamese.
+    Falls back to a fixed template if the LLM is unavailable."""
+    template_subject = "⚠️ CẢNH BÁO PHÁT HIỆN NGÃ"
+    template_body = (
         f"⚠️ CẢNH BÁO PHÁT HIỆN NGÃ\n\n"
         f"Khu vực: {zone} ({camera})\n"
         f"Độ tin cậy: {confidence*100:.1f}%\n"
-        f"Thời gian: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"Thời gian: {when_str}\n\n"
+        f"Vui lòng kiểm tra ngay. Ảnh hiện trường đính kèm.\n\n"
         f"— Hệ thống giám sát Aegis"
     )
-    _send_email("⚠️ CẢNH BÁO PHÁT HIỆN NGÃ", body)
+    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not key:
+        return template_subject, template_body
+    try:
+        from google import genai
+        client = genai.Client(api_key=key)
+        prompt = (
+            "Bạn là hệ thống giám sát an toàn 'Aegis'. Soạn một EMAIL CẢNH BÁO NGÃ "
+            "bằng tiếng Việt để gửi người thân/giám hộ: khẩn trương nhưng bình tĩnh, "
+            "ngắn gọn, chuyên nghiệp, có hướng dẫn hành động (kiểm tra ngay, gọi cấp cứu "
+            "nếu cần). Có nhắc 'ảnh hiện trường đính kèm'.\n"
+            f"DỮ LIỆU: khu vực={zone}; camera={camera}; thời gian={when_str}; "
+            f"độ tin cậy={confidence*100:.0f}%.\n"
+            "Trả về CHÍNH XÁC theo định dạng:\nSUBJECT: <tiêu đề>\nBODY:\n<nội dung email>"
+        )
+        for model in (os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+                      "gemini-2.5-flash-lite", "gemini-flash-latest"):
+            try:
+                resp = client.models.generate_content(model=model, contents=prompt)
+                text = (getattr(resp, "text", None) or "").strip()
+                if not text:
+                    continue
+                subject, body = template_subject, text
+                if "SUBJECT:" in text:
+                    after = text.split("SUBJECT:", 1)[1]
+                    if "BODY:" in after:
+                        s, b = after.split("BODY:", 1)
+                        subject, body = s.strip(), b.strip()
+                    else:
+                        subject = after.strip().splitlines()[0].strip()
+                return (subject or template_subject), (body or template_body)
+            except Exception as e:
+                msg = str(e).lower()
+                if any(s in msg for s in ("503", "429", "unavailable", "resource_exhausted")):
+                    continue
+                break
+    except Exception as e:
+        print(f"AI email compose failed, using template: {e}")
+    return template_subject, template_body
 
 
-def send_alert_async(confidence: float, zone: str = "Main Floor", camera: str = "CAM-01"):
-    thread = threading.Thread(target=send_email_alert, args=(confidence, zone, camera))
+def send_email_alert(confidence: float, zone: str = "Main Floor",
+                     camera: str = "CAM-01", image_path: Optional[str] = None):
+    when_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    subject, body = _compose_fall_email_ai(confidence, zone, camera, when_str)
+    _send_email(subject, body, attachment_path=image_path)
+
+
+def send_alert_async(confidence: float, zone: str = "Main Floor",
+                     camera: str = "CAM-01", image_path: Optional[str] = None):
+    thread = threading.Thread(target=send_email_alert, args=(confidence, zone, camera, image_path))
     thread.daemon = True
     thread.start()
 
@@ -802,8 +863,8 @@ async def websocket_predict(websocket: WebSocket):
                             if current_time - last_alert_time > COOLDOWN_SECONDS:
                                 print("🚨 FALL DETECTED! (MediaPipe+TCN)")
                                 snap = Image.fromarray(frame[:, :, ::-1])
-                                save_detection("fall", r["prob"] or 0.9, snap)
-                                send_alert_async(r["prob"] or 0.9)
+                                saved = save_detection("fall", r["prob"] or 0.9, snap)
+                                send_alert_async(r["prob"] or 0.9, image_path=saved)
                                 last_alert_time = current_time
                         await websocket.send_json({"detections": dets, "fall_detected": bool(r["fall"])})
                         continue
@@ -886,8 +947,9 @@ async def websocket_predict(websocket: WebSocket):
                             # actual moment of the fall — not the lagged current one.
                             best_arr, _ = (max(recent_frames, key=lambda x: x[1])
                                            if recent_frames else (np.asarray(image), 0.0))
-                            save_detection("fall", best_fall_conf or 0.9, Image.fromarray(best_arr))
-                            send_alert_async(best_fall_conf or 0.9)
+                            saved = save_detection("fall", best_fall_conf or 0.9, Image.fromarray(best_arr))
+                            # AI composes the alert email + attaches the snapshot.
+                            send_alert_async(best_fall_conf or 0.9, image_path=saved)
                             last_alert_time = current_time
 
                     await websocket.send_json({
