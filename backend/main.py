@@ -1793,24 +1793,47 @@ def _gemini_agent_answer(question: str, stats: Dict, events: List[Dict], api_key
         f"CÂU HỎI: {question}"
     )
     client = genai.Client(api_key=api_key)
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    resp = client.models.generate_content(model=model, contents=prompt)
-    text = (getattr(resp, "text", None) or "").strip()
-    if not text:
-        raise RuntimeError("empty Gemini response")
-    return {
-        "answer": text,
-        "mode": "llm",
-        "tools_used": [{"name": "gemini", "summary": f"Hỏi {model} kèm dữ liệu hệ thống"}],
-        "chart": None,
-        "table": None,
-        "citations": [f"Gemini ({model}) · dựa trên {stats.get('total_falls', 0)} sự kiện đã ghi nhận"],
-        "suggestions": [
-            "Giờ cao điểm ngã là khi nào?",
-            "Khu vực nào rủi ro nhất?",
-            "Tóm tắt tình hình 7 ngày qua",
-        ],
-    }
+    primary = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    # The free tier of gemini-2.5-flash frequently returns transient 503
+    # ("high demand") / 429 (rate limit). Retry a few times, then fall back to
+    # lighter models that have more free-tier headroom, so the Copilot keeps
+    # answering with the LLM instead of silently dropping to the grounded engine.
+    models: List[str] = [primary]
+    for m in ("gemini-2.5-flash-lite", "gemini-flash-latest"):
+        if m not in models:
+            models.append(m)
+
+    transient = ("503", "unavailable", "429", "resource_exhausted",
+                 "high demand", "overloaded", "deadline")
+    last_err: Optional[Exception] = None
+    for model in models:
+        for attempt in range(3):
+            try:
+                resp = client.models.generate_content(model=model, contents=prompt)
+                text = (getattr(resp, "text", None) or "").strip()
+                if not text:
+                    raise RuntimeError("empty Gemini response")
+                return {
+                    "answer": text,
+                    "mode": "llm",
+                    "tools_used": [{"name": "gemini", "summary": f"Hỏi {model} kèm dữ liệu hệ thống"}],
+                    "chart": None,
+                    "table": None,
+                    "citations": [f"Gemini ({model}) · dựa trên {stats.get('total_falls', 0)} sự kiện đã ghi nhận"],
+                    "suggestions": [
+                        "Giờ cao điểm ngã là khi nào?",
+                        "Khu vực nào rủi ro nhất?",
+                        "Tóm tắt tình hình 7 ngày qua",
+                    ],
+                }
+            except Exception as e:  # noqa: BLE001 - decide retry vs next model
+                last_err = e
+                msg = str(e).lower()
+                if any(s in msg for s in transient):
+                    time.sleep(1.0 * (attempt + 1))   # brief backoff, then retry
+                    continue
+                break  # non-transient error -> try the next model
+    raise last_err or RuntimeError("Gemini unavailable")
 
 
 @app.post("/api/agent/query")
