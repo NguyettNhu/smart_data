@@ -265,87 +265,78 @@ def detect_fall_from_pose(keypoints, box, confidence) -> Dict[str, Any]:
     if len(valid_points) < 5:
         return _fallback_bbox_logic(box, confidence)
 
-    # Can we actually see enough of the body to judge posture?
-    lower_body_visible = len(hips) > 0 or len(ankles) > 0
+    # Reference skeleton points.
+    knees = [p for p in (_kp(keypoints, 13), _kp(keypoints, 14)) if p is not None]
+    sh_c = np.mean(shoulders, axis=0) if shoulders else None
+    hip_c = np.mean(hips, axis=0) if hips else None
+    head = nose if nose is not None else sh_c
+    low_c = (np.mean(ankles, axis=0) if ankles
+             else (np.mean(knees, axis=0) if knees else None))
+
+    x1b, y1b, x2b, y2b = box
+    bw, bh = (x2b - x1b), (y2b - y1b)
+    ar = (bw / bh) if bh > 0 else 0.0
 
     fall_score = 0.0
     reasons = []
 
-    # RULE 1 (PRIMARY): torso axis orientation (shoulders -> hips)
-    if len(shoulders) > 0 and len(hips) > 0:
-        shoulder_c = np.mean(shoulders, axis=0)
-        hip_c = np.mean(hips, axis=0)
-        dx = abs(shoulder_c[0] - hip_c[0])
-        dy = abs(shoulder_c[1] - hip_c[1])
-        tilt = np.degrees(np.arctan2(dx, dy + 1e-6))  # 0 deg = perfectly upright
-        if tilt > 60:           # torso almost horizontal -> lying down
+    # PRIMARY signal: orientation of the FULL-BODY axis (head -> feet). This is
+    # what separates a real FALL from a BEND / SQUAT — the case torso-only logic
+    # always got wrong. When a person bends over or squats, the feet stay on the
+    # floor and the head stays well above them, so the head->feet axis is still
+    # vertical. Only when someone is on the ground are head, hips and feet at the
+    # same level, making that axis horizontal.
+    full_tilt = None
+    if head is not None and low_c is not None:
+        dx = abs(float(head[0] - low_c[0]))
+        dy = abs(float(head[1] - low_c[1]))
+        full_tilt = float(np.degrees(np.arctan2(dx, dy + 1e-6)))  # 0 = head directly above feet
+        # HARD GATE: head clearly above the feet -> upright / bending / squatting,
+        # never a fall, regardless of how horizontal the torso looks.
+        if full_tilt < 35:
+            return {"is_fall": False, "status": "standing", "fall_confidence": 0,
+                    "reasons": [f"head_above_feet({full_tilt:.0f}deg)"]}
+        if full_tilt > 55:
+            fall_score += 0.8
+            reasons.append(f"body_horizontal({full_tilt:.0f}deg)")
+        elif full_tilt > 40:
+            fall_score += 0.45
+            reasons.append(f"body_tilted({full_tilt:.0f}deg)")
+
+    # SECONDARY: torso axis (shoulders -> hips). Trusted on its own only when the
+    # feet/knees are not visible, so we still react to upper-body-only falls.
+    if sh_c is not None and hip_c is not None and full_tilt is None:
+        dx = abs(float(sh_c[0] - hip_c[0]))
+        dy = abs(float(sh_c[1] - hip_c[1]))
+        tilt = float(np.degrees(np.arctan2(dx, dy + 1e-6)))
+        if tilt > 60:
             fall_score += 0.7
             reasons.append(f"torso_horizontal({tilt:.0f}deg)")
-        elif tilt > 45:         # strongly tilted -> probably falling
+        elif tilt > 45:
             fall_score += 0.4
             reasons.append(f"torso_tilted({tilt:.0f}deg)")
-        # near-vertical torso adds nothing: this is a standing person
 
-    # RULE 2: Head-to-Feet horizontal orientation (good for side views)
-    if nose is not None and len(ankles) > 0:
-        feet_c = np.mean(ankles, axis=0)
-        body_dx = abs(feet_c[0] - nose[0])
-        body_dy = abs(feet_c[1] - nose[1])
-        if body_dx > body_dy:   # head and feet roughly on the same level
-            fall_score += 0.5
-            reasons.append("head_feet_horizontal")
-
-    # RULE 3: Keypoint spread ratio -- ONLY trustworthy when the lower body is
-    # in frame. Skipped for upper-body-only crops to avoid the false alarm.
-    if lower_body_visible:
-        pts = np.array(valid_points, dtype=float)
-        x_spread = np.max(pts[:, 0]) - np.min(pts[:, 0])
-        y_spread = np.max(pts[:, 1]) - np.min(pts[:, 1])
-        spread_ratio = x_spread / y_spread if y_spread > 0 else 0
-        if spread_ratio > 1.2:
-            fall_score += 0.5
-            reasons.append("high_spread_ratio")
-        elif spread_ratio > 0.85:
-            fall_score += 0.3
-            reasons.append("medium_spread_ratio")
-
-    # Bounding-box corroboration. An UPRIGHT person (standing / walking /
-    # bending forward / squatting) has a box taller than wide; a person lying
-    # on the ground has a square-to-wide box. Require this so a forward-bend, a
-    # squat, or two overlapping people whose keypoints merge into a fake
-    # "horizontal torso" cannot be scored as a fall.
-    x1b, y1b, x2b, y2b = box
-    bw, bh = (x2b - x1b), (y2b - y1b)
-    ar = (bw / bh) if bh > 0 else 0.0
+    # Corroboration: a person on the ground has a square-to-wide box.
     if ar > 1.2:
-        fall_score += 0.30                       # wide box strongly corroborates a fall
+        fall_score += 0.25
         reasons.append(f"wide_box({ar:.2f})")
-    elif ar < 0.9:
-        fall_score = min(fall_score, 0.30)       # clearly upright -> cannot be "fallen"
+    elif ar < 0.9 and full_tilt is None:
+        # Tall box AND we couldn't measure the body axis -> stay conservative.
+        fall_score = min(fall_score, 0.30)
         reasons.append(f"upright_box({ar:.2f})")
 
     # Decision
-    if fall_score >= 0.6:
-        return {
-            "is_fall": True,
-            "status": "fallen",
-            "fall_confidence": min(0.95, confidence * (0.6 + fall_score)),
-            "reasons": reasons
-        }
-    elif fall_score >= 0.4:
-        return {
-            "is_fall": True,
-            "status": "falling",
-            "fall_confidence": min(0.75, confidence * (0.5 + fall_score)),
-            "reasons": reasons
-        }
+    if fall_score >= 0.7:
+        return {"is_fall": True, "status": "fallen",
+                "fall_confidence": min(0.95, confidence * (0.6 + fall_score)),
+                "reasons": reasons}
+    elif fall_score >= 0.45:
+        return {"is_fall": True, "status": "falling",
+                "fall_confidence": min(0.75, confidence * (0.5 + fall_score)),
+                "reasons": reasons}
     else:
-        return {
-            "is_fall": False,
-            "status": "standing",
-            "fall_confidence": 0,
-            "reasons": reasons
-        }
+        return {"is_fall": False, "status": "standing",
+                "fall_confidence": 0, "reasons": reasons}
 
 def _fallback_bbox_logic(box, confidence):
     # Used when keypoints are unreliable (e.g. small / distant people in CCTV
@@ -433,11 +424,23 @@ def pose_features_2d(keypoints, box, img_w, img_h):
     if hip and kn and an:
         knee_avg = _knee(mid_hip, np.mean(kn, axis=0), np.mean(an, axis=0))
 
+    # Full-body axis (head -> feet): True when the head is clearly ABOVE the
+    # feet (upright / bending / squatting), which can never be a fall. Feet fall
+    # back to knees when ankles are hidden; unknown -> False (don't suppress).
+    head_pt = nose if nose is not None else mid_sh
+    low_pt = (np.mean(an, axis=0) if an else (np.mean(kn, axis=0) if kn else None))
+    head_above_feet = False
+    if low_pt is not None:
+        dxf = abs(float(head_pt[0] - low_pt[0]))
+        dyf = abs(float(head_pt[1] - low_pt[1]))
+        head_above_feet = bool(np.degrees(np.arctan2(dxf, dyf + 1e-6)) < 35)
+
     return {
         "hip_y": float(mid_hip[1]), "nose_y": float(nose[1]) if nose is not None else float(mid_sh[1]),
         "spine_horiz": spine_horiz, "bbox_ar": bbox_ar,
         "sh_tilt": sh_tilt, "hip_tilt": hip_tilt,
         "head_hip_dy": head_hip_dy, "knee_avg": knee_avg,
+        "head_above_feet": head_above_feet,
     }
 
 
@@ -474,7 +477,9 @@ class FallScorer:
         # fallen" false alarms while still letting genuine falls through once the
         # body drops or ends up horizontal on the ground.
         max_v_recent = max([f["v_hip"] for f in buf[-10:]]) if len(buf) >= 10 else 0.0
-        if cur["bbox_ar"] < 0.80 and max_v_recent < 0.03:
+        # Head clearly above feet (bend / squat / stand), or a tall upright box —
+        # cannot be a fall unless there is a real downward velocity spike.
+        if (cur.get("head_above_feet") or cur["bbox_ar"] < 0.80) and max_v_recent < 0.03:
             return 0.0
 
         # --- NEGATIVE GATES (suppress non-falls) ---
