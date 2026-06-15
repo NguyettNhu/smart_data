@@ -160,4 +160,11 @@ export const api = {
 
   deleteSnapshot: (id: number) =>
     fetch(apiUrl(`/api/snapshots/${id}`), { method: "DELETE" }).catch(() => undefined),
+
+  // An event IS a detection row, so deleting the row removes the incident
+  // (and its snapshot). Reuses the existing DELETE /api/snapshots/{id}.
+  deleteEvent: (id: number) =>
+    fetch(apiUrl(`/api/snapshots/${id}`), { method: "DELETE" })
+      .then((r) => r.ok)
+      .catch(() => false),
 };

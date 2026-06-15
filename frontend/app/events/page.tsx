@@ -1,7 +1,7 @@
 "use client";
 import * as React from "react";
 import { motion } from "motion/react";
-import { Search, SlidersHorizontal, ChevronRight, Siren, ShieldAlert, Activity, CheckCircle2, Camera } from "lucide-react";
+import { Search, SlidersHorizontal, ChevronRight, Siren, ShieldAlert, Activity, CheckCircle2, Camera, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { FallEvent, Stats } from "@/lib/types";
 import { EMPTY_STATS } from "@/lib/api";
@@ -57,6 +57,15 @@ export default function EventsPage() {
   const openEvent = (ev: FallEvent) => {
     setSelected(ev);
     setOpen(true);
+  };
+
+  const deleteEvent = async (e: React.MouseEvent, ev: FallEvent) => {
+    e.stopPropagation(); // don't open the drawer
+    if (!window.confirm(`Xóa sự cố tại ${ev.zone} • ${ev.camera} (${pct(ev.confidence)})?`)) return;
+    setEvents((prev) => (prev ? prev.filter((x) => x.id !== ev.id) : prev)); // optimistic
+    if (selected?.id === ev.id) setOpen(false);
+    const ok = await api.deleteEvent(ev.id);
+    if (!ok) load(); // re-sync if the delete failed
   };
 
   return (
@@ -169,8 +178,19 @@ export default function EventsPage() {
                       <td className="px-4 py-3 text-ink-2">{timeAgo(parseTs(ev.timestamp))}</td>
                       <td className="px-4 py-3 tabular-nums text-ink-2">{formatDuration(ev.response_time)}</td>
                       <td className="px-4 py-3"><StatusBadge status={ev.status} /></td>
-                      <td className="px-4 py-3 text-right">
-                        <ChevronRight className="ml-auto size-4 text-ink-4 transition-transform group-hover:translate-x-0.5 group-hover:text-ink-2" />
+                      <td className="px-4 py-3">
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            type="button"
+                            onClick={(e) => deleteEvent(e, ev)}
+                            title="Xóa sự cố"
+                            aria-label="Xóa sự cố"
+                            className="grid size-7 place-items-center rounded-md text-ink-4 opacity-0 transition-all hover:bg-danger-soft hover:text-danger focus:opacity-100 group-hover:opacity-100"
+                          >
+                            <Trash2 className="size-4" />
+                          </button>
+                          <ChevronRight className="size-4 text-ink-4 transition-transform group-hover:translate-x-0.5 group-hover:text-ink-2" />
+                        </div>
                       </td>
                     </motion.tr>
                   ))}
